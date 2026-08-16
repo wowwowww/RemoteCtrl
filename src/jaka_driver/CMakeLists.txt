@@ -32,6 +32,7 @@ add_executable(jaka_driver src/jaka_driver.cpp)
 add_executable(sdk_test src/sdk_test.cpp)
 add_executable(client src/client.cpp)
 add_executable(servoj_demo src/servoj_demo.cpp)
+add_executable(rc_ctrl_node src/rc_ctrl_node.cpp)
 
 # Link libraries
 ament_target_dependencies(jaka_driver
@@ -69,6 +70,13 @@ ament_target_dependencies(servoj_demo
   jaka_msgs
   action_msgs
 )
+ament_target_dependencies(rc_ctrl_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  sensor_msgs
+  jaka_msgs
+)
 
 # For including directories in ROS 2
 target_include_directories(jaka_driver
@@ -99,6 +107,13 @@ target_include_directories(servoj_demo
     ${ament_INCLUDE_DIRS}
 )
 
+target_include_directories(rc_ctrl_node
+  PUBLIC
+    include
+  PRIVATE
+    ${ament_INCLUDE_DIRS}
+)
+
 
 
 # Specify where to find external libraries
@@ -112,6 +127,7 @@ target_link_libraries(jaka_driver ${LIBRARY_DIR}/libjakaAPI.so)
 target_link_libraries(sdk_test ${LIBRARY_DIR}/libjakaAPI.so)
 target_link_libraries(client ${LIBRARY_DIR}/libjakaAPI.so)
 target_link_libraries(servoj_demo ${LIBRARY_DIR}/libjakaAPI.so)
+target_link_libraries(rc_ctrl_node ${LIBRARY_DIR}/libjakaAPI.so)
 
 # Install executables
 install(TARGETS
@@ -119,6 +135,7 @@ install(TARGETS
   sdk_test
   client
   servoj_demo
+  rc_ctrl_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
