@@ -31,6 +31,11 @@ def generate_launch_description():
         default_value='/rc_ctrl/right_target',
         description='Topic carrying the right handle target pose (PoseStamped)'
     )
+    button_topic_arg = DeclareLaunchArgument(
+        'button_topic',
+        default_value='/rc_ctrl/button',
+        description='Topic carrying the VR button/grip state (sensor_msgs/Joy)'
+    )
 
     # Create a node for the RC control
     rc_ctrl_node = Node(
@@ -43,7 +48,8 @@ def generate_launch_description():
             'robot_left_ip': LaunchConfiguration('robot_left_ip'),
             'robot_right_ip': LaunchConfiguration('robot_right_ip'),
             'left_target_topic': LaunchConfiguration('left_target_topic'),
-            'right_target_topic': LaunchConfiguration('right_target_topic')
+            'right_target_topic': LaunchConfiguration('right_target_topic'),
+            'button_topic': LaunchConfiguration('button_topic')
         }]
     )
 
@@ -53,6 +59,7 @@ def generate_launch_description():
         rc_ctrl_arg,
         left_target_topic_arg,
         right_target_topic_arg,
+        button_topic_arg,
         rc_ctrl_node,
         LogInfo(msg="RC control node launched.")
     ])

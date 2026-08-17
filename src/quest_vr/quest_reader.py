@@ -18,6 +18,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, TransformStamped
+from sensor_msgs.msg import Joy
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_pose_stamped
 
@@ -151,9 +152,32 @@ def rot_matrix_to_quaternion(R):
 
 def matrix_to_pose(matrix):
     """4x4 齐次矩阵 -> (平移 3 向量, 四元数 [w,x,y,z])。"""
-    trans = matrix[0:3, 3]  # 平移（米）
+    init_trans = matrix[0:3, 3]  # 平移（米）
+    trans= np.array([-init_trans[2], -init_trans[0], init_trans[1]])
     quat = rot_matrix_to_quaternion(matrix[0:3, 0:3])
     return trans, quat
+
+
+def buttons_to_joy(buttons):
+    """把 parse_buttons() 的 dict 转成 sensor_msgs/Joy。
+
+    固定 axes 布局（rc_ctrl_node 只用前两项）：
+      axes[0]=leftGrip  axes[1]=rightGrip  axes[2]=leftTrig  axes[3]=rightTrig
+      axes[4..5]=leftJS(x,y)  axes[6..7]=rightJS(x,y)
+    模拟量键可能是浮点 0.0（默认）或 (val,) 元组（解析到值），摇杆是 (x, y) 元组。
+    """
+    def fv(key):
+        v = buttons.get(key, 0.0)
+        return float(v[0]) if isinstance(v, (tuple, list)) else float(v)
+
+    def xy(key):
+        v = buttons.get(key, (0.0, 0.0))
+        return [float(v[0]), float(v[1])] if isinstance(v, (tuple, list)) else [0.0, 0.0]
+
+    joy = Joy()
+    joy.axes = [fv('leftGrip'), fv('rightGrip'),
+                fv('leftTrig'), fv('rightTrig')] + xy('leftJS') + xy('rightJS')
+    return joy
 
 
 class QuestReader(Node):
@@ -171,6 +195,7 @@ class QuestReader(Node):
         self.right_hand_key = self.declare_parameter('right_hand_key', 'r').value
         left_topic = self.declare_parameter('left_target_topic', '/rc_ctrl/left_target').value
         right_topic = self.declare_parameter('right_target_topic', '/rc_ctrl/right_target').value
+        button_topic = self.declare_parameter('button_topic', '/rc_ctrl/button').value
         publish_rate = self.declare_parameter('publish_rate', 125.0).value
         # adb/logcat 读取参数（未设置 command 时使用）
         self.adb_tag = self.declare_parameter('adb_tag', 'wE9ryARX').value
@@ -179,8 +204,9 @@ class QuestReader(Node):
         self.start_apk = self.declare_parameter('start_apk', True).value
 
         # 发布者
-        self.left_pub = self.create_publisher(PoseStamped, left_topic, 10)
-        self.right_pub = self.create_publisher(PoseStamped, right_topic, 10)
+        self.left_pub = self.create_publisher(PoseStamped, left_topic, 5)
+        self.right_pub = self.create_publisher(PoseStamped, right_topic, 5)
+        self.button_pub = self.create_publisher(Joy, button_topic, 5)
 
         # TF：广播「眼镜帧 -> 机器人基帧」静态变换，并用 tf2 做动态变换
         self.tf_broadcaster = StaticTransformBroadcaster(self)
@@ -302,6 +328,7 @@ class QuestReader(Node):
         with self.lock:
             left = self.latest_left
             right = self.latest_right
+            buttons = self.latest_buttons
         if left is None and right is None:
             return
         try:
@@ -315,6 +342,8 @@ class QuestReader(Node):
             self.left_pub.publish(self._to_base(left, transform))
         if right is not None:
             self.right_pub.publish(self._to_base(right, transform))
+        if buttons is not None:
+            self.button_pub.publish(buttons_to_joy(buttons))
 
         self.get_logger().debug('左右手位置按钮: left=%s, right=%s, buttons=%s' % (left, right, self.latest_buttons))
 
