@@ -1,9 +1,10 @@
 """读取 Quest VR 眼镜位姿并发布为双臂伺服目标。
 
 默认通过 adb logcat 实时读取眼镜 APK 输出的手柄数据（标签由参数 adb_tag
-指定），逐行解析左右两个手柄的 4x4 齐次变换矩阵（平移米 + 旋转矩阵），把
-旋转矩阵转成四元数，再经「眼镜帧 -> 机器人基帧」的静态 TF 变换后，发布两个
-PoseStamped 给 rc_ctrl_node 做绝对伺服跟踪（控制频率 125 Hz）。
+指定），逐行解析左右两个手柄的 4x4 齐次变换矩阵（平移米 + 旋转矩阵），先对
+旋转矩阵转置再左乘一个固定正当旋转，对齐手柄↔rpy 的轴（手柄 x->rx, y->ry,
+z->rz），再转成四元数并做一阶低通滤波，经「眼镜帧 -> 机器人基帧」的静态 TF
+变换后，发布两个 PoseStamped 给 rc_ctrl_node 做绝对伺服跟踪（控制频率 125 Hz）。
 
 若设置了参数 command，则改为从该子进程的 stdout 读取（离线测试用）。
 """
@@ -153,8 +154,19 @@ def rot_matrix_to_quaternion(R):
 def matrix_to_pose(matrix):
     """4x4 齐次矩阵 -> (平移 3 向量, 四元数 [w,x,y,z])。"""
     init_trans = matrix[0:3, 3]  # 平移（米）
-    trans= np.array([-init_trans[2], -init_trans[0], init_trans[1]])
-    quat = rot_matrix_to_quaternion(matrix[0:3, 0:3])
+    trans = np.array([-init_trans[2], -init_trans[0], init_trans[1]])
+
+    R = matrix[0:3, 0:3]
+    # 对齐手柄 -> 机器人 rpy 轴（目标 手柄 x->rx, y->ry, z->rz）。
+    # 实测原始矩阵（不做任何修正）的手柄->rpy「增量」映射是 x->rz, y->-rx, z->ry，
+    # 即 rpy = P@h，P = [[0,-1,0],[0,0,1],[1,0,0]]，det(P)=-1（镜像）。链条里存在一次
+    # 转置/手性翻转，单靠左乘正当旋转无法表达，故先转置 R.T 再左乘正当旋转 C=-P^T：
+    # C@R.T 永远是正当旋转（det=+1），且把增量映射修正为恒等（x->rx, y->ry, z->rz）。
+    C = np.array([[0.0, 0.0, -1.0],
+                  [1.0, 0.0, 0.0],
+                  [0.0, -1.0, 0.0]])
+    R = C @ R.T
+    quat = rot_matrix_to_quaternion(R)
     return trans, quat
 
 
@@ -197,6 +209,8 @@ class QuestReader(Node):
         right_topic = self.declare_parameter('right_target_topic', '/rc_ctrl/right_target').value
         button_topic = self.declare_parameter('button_topic', '/rc_ctrl/button').value
         publish_rate = self.declare_parameter('publish_rate', 125.0).value
+        # 位姿一阶低通滤波系数（0~1，越大越跟手、越小越平滑；0 表示不过滤）
+        self.smooth_alpha = float(self.declare_parameter('smooth_alpha', 0.4).value)
         # adb/logcat 读取参数（未设置 command 时使用）
         self.adb_tag = self.declare_parameter('adb_tag', 'wE9ryARX').value
         self.apk_activity = self.declare_parameter(
@@ -218,6 +232,8 @@ class QuestReader(Node):
         self.lock = threading.Lock()
         self.latest_left = None
         self.latest_right = None
+        self.filtered_left = None
+        self.filtered_right = None
         self.latest_buttons = {}
         self._running = False
         self.proc = None
@@ -314,13 +330,37 @@ class QuestReader(Node):
             if rc is not None:
                 self.get_logger().warning('adb logcat 已退出，返回码 %d' % rc)
 
+    def _filter_pose(self, prev, new):
+        """对 (平移 3 向量, 四元数) 做一阶低通（EMA），抑制手柄跟踪噪声导致的抖动。
+
+        四元数先做符号对齐（q 与 -q 代表同一姿态，避免分量平均退化），滤波后归一化。
+        prev 为 None 时直接返回原始值（首帧无历史）。
+        """
+        if prev is None or self.smooth_alpha <= 0.0:
+            return new
+        a = self.smooth_alpha
+        pt, pq = np.asarray(prev[0], float), np.asarray(prev[1], float)
+        nt, nq = np.asarray(new[0], float), np.asarray(new[1], float)
+        trans = pt + a * (nt - pt)
+        if float(np.dot(pq, nq)) < 0.0:
+            nq = -nq
+        quat = pq + a * (nq - pq)
+        n = float(np.linalg.norm(quat))
+        if n > 1e-12:
+            quat = quat / n
+        return trans, quat
+
     def _ingest(self, data):
         transforms, buttons = parse_data(data)
         with self.lock:
             if self.left_hand_key in transforms:
-                self.latest_left = matrix_to_pose(transforms[self.left_hand_key])
+                self.filtered_left = self._filter_pose(
+                    self.filtered_left, matrix_to_pose(transforms[self.left_hand_key]))
+                self.latest_left = self.filtered_left
             if self.right_hand_key in transforms:
-                self.latest_right = matrix_to_pose(transforms[self.right_hand_key])
+                self.filtered_right = self._filter_pose(
+                    self.filtered_right, matrix_to_pose(transforms[self.right_hand_key]))
+                self.latest_right = self.filtered_right
             if buttons:
                 self.latest_buttons = buttons
 

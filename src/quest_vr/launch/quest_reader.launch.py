@@ -39,6 +39,9 @@ def generate_launch_description():
     rate_arg = DeclareLaunchArgument(
         'publish_rate', default_value='125.0',
         description='发布/变换频率（Hz）')
+    smooth_alpha_arg = DeclareLaunchArgument(
+        'smooth_alpha', default_value='0.4',
+        description='位姿一阶低通滤波系数（0~1，越大越跟手，0 表示不过滤）')
 
     quest_reader_node = Node(
         package='quest_vr',
@@ -57,6 +60,7 @@ def generate_launch_description():
             'left_target_topic': LaunchConfiguration('left_target_topic'),
             'right_target_topic': LaunchConfiguration('right_target_topic'),
             'publish_rate': ParameterValue(LaunchConfiguration('publish_rate'), value_type=float),
+            'smooth_alpha': ParameterValue(LaunchConfiguration('smooth_alpha'), value_type=float),
             # 静态 TF：眼镜原点在机器人基坐标系下的位姿（标定后填）
             'tf_translation': [0.0, 0.0, 0.0],
             'tf_rotation': [1.0, 0.0, 0.0, 0.0],
@@ -75,5 +79,6 @@ def generate_launch_description():
         left_topic_arg,
         right_topic_arg,
         rate_arg,
+        smooth_alpha_arg,
         quest_reader_node,
     ])
