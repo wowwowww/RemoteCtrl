@@ -37,19 +37,36 @@ def generate_launch_description():
         description='Topic carrying the VR button/grip state (sensor_msgs/Joy)'
     )
 
-    # Create a node for the RC control
-    rc_ctrl_node = Node(
+    # One process per arm: the JAKA SDK holds a single global connection per
+    # process, so each rc_ctrl_node instance drives exactly one robot. Two
+    # instances (left / right) are launched here, each logging into its own arm
+    # and reading its own grip axis from the shared /rc_ctrl/button Joy topic.
+    rc_ctrl_left_node = Node(
         package='jaka_driver',
         executable='rc_ctrl_node',
-        name='rc_ctrl_node',
+        name='rc_ctrl_left',
         output='screen',
         condition=launch.conditions.IfCondition(LaunchConfiguration('rc_ctrl')),
         parameters=[{
-            'robot_left_ip': LaunchConfiguration('robot_left_ip'),
-            'robot_right_ip': LaunchConfiguration('robot_right_ip'),
-            'left_target_topic': LaunchConfiguration('left_target_topic'),
-            'right_target_topic': LaunchConfiguration('right_target_topic'),
-            'button_topic': LaunchConfiguration('button_topic')
+            'arm_name': 'left',
+            'robot_ip': LaunchConfiguration('robot_left_ip'),
+            'target_topic': LaunchConfiguration('left_target_topic'),
+            'button_topic': LaunchConfiguration('button_topic'),
+            'grip_axis': 0,
+        }]
+    )
+    rc_ctrl_right_node = Node(
+        package='jaka_driver',
+        executable='rc_ctrl_node',
+        name='rc_ctrl_right',
+        output='screen',
+        condition=launch.conditions.IfCondition(LaunchConfiguration('rc_ctrl')),
+        parameters=[{
+            'arm_name': 'right',
+            'robot_ip': LaunchConfiguration('robot_right_ip'),
+            'target_topic': LaunchConfiguration('right_target_topic'),
+            'button_topic': LaunchConfiguration('button_topic'),
+            'grip_axis': 1,
         }]
     )
 
@@ -60,6 +77,7 @@ def generate_launch_description():
         left_target_topic_arg,
         right_target_topic_arg,
         button_topic_arg,
-        rc_ctrl_node,
-        LogInfo(msg="RC control node launched.")
+        rc_ctrl_left_node,
+        rc_ctrl_right_node,
+        LogInfo(msg="RC control nodes launched.")
     ])

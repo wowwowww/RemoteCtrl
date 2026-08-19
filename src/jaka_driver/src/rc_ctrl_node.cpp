@@ -32,19 +32,23 @@ map<int, string> mapErr = {
     {-12, "ERR_MOTION_ABNORMAL"}
 };
 
-JAKAZuRobot left_robot;
-JAKAZuRobot right_robot;
+// Single-arm teleop node. The JAKA SDK holds ONE global connection per process
+// (libjakaAPI.so's `robot` shared_ptr), so a process can only drive a single
+// robot. This node controls exactly one arm, chosen by the `arm_name` parameter;
+// the launch file starts two instances (one per arm).
+JAKAZuRobot robot;
 
-// Per-arm teleop state: whether the grip is currently held, the controller/arm
-// poses captured at the press instant, and the latest controller pose.
-bool left_gripped = false, right_gripped = false;
-CartesianPose left_ctrl_origin, right_ctrl_origin;  // controller pose at grip press (origin)
-CartesianPose left_ctrl_prev, right_ctrl_prev;      // last controller pose we commanded
-geometry_msgs::msg::PoseStamped::SharedPtr latest_left, latest_right;
-// Whether each arm connected successfully at startup (login_in == 0). A failed
-// arm is skipped for power_on/enable/servo so its SDK errors don't hide the
-// other, healthy arm.
-bool left_ok = false, right_ok = false;
+// Teleop state: whether the grip is currently held, the controller pose captured
+// at the press instant, and the latest controller pose.
+bool gripped = false;
+CartesianPose ctrl_origin;   // controller pose at grip press (origin)
+CartesianPose ctrl_prev;     // last controller pose we commanded
+geometry_msgs::msg::PoseStamped::SharedPtr latest;
+// Whether the arm connected successfully at startup (login_in == 0). A failed
+// arm is skipped for power_on/enable/servo.
+bool arm_ok = false;
+std::string arm_name = "left";
+int grip_axis = 0;           // index into Joy.axes: 0 = leftGrip, 1 = rightGrip
 
 // Convert a PoseStamped (position in meters + quaternion) into a JAKA
 // CartesianPose (translation in mm + RPY in radians).
@@ -223,38 +227,24 @@ void handle_grip(bool &gripped, float value,
     }
 }
 
-void left_target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+void target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
-    if (!left_ok)
+    if (!arm_ok)
         return;
-    latest_left = msg;
-    if (left_gripped)
+    latest = msg;
+    if (gripped)
     {
-        servo_cartesian(left_robot, msg, left_ctrl_origin, left_ctrl_prev, "left");
-    }
-}
-
-void right_target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
-    if (!right_ok)
-        return;
-    latest_right = msg;
-    if (right_gripped)
-    {
-        servo_cartesian(right_robot, msg, right_ctrl_origin, right_ctrl_prev, "right");
+        servo_cartesian(robot, msg, ctrl_origin, ctrl_prev, arm_name.c_str());
     }
 }
 
 void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
 {
-    float left_grip = msg->axes.size() > 0 ? msg->axes[0] : 0.0f;
-    float right_grip = msg->axes.size() > 1 ? msg->axes[1] : 0.0f;
-    if (left_ok)
-        handle_grip(left_gripped, left_grip, latest_left, left_robot,
-                    left_ctrl_origin, left_ctrl_prev, "left");
-    if (right_ok)
-        handle_grip(right_gripped, right_grip, latest_right, right_robot,
-                    right_ctrl_origin, right_ctrl_prev, "right");
+    float grip = msg->axes.size() > static_cast<size_t>(grip_axis)
+                     ? msg->axes[grip_axis] : 0.0f;
+    if (arm_ok)
+        handle_grip(gripped, grip, latest, robot,
+                    ctrl_origin, ctrl_prev, arm_name.c_str());
 }
 
 // Bring one arm fully online: login -> power_on -> enable -> servo. Mirrors the
@@ -324,48 +314,45 @@ int main(int argc, char *argv[])
 {
     setlocale(LC_ALL, "C");
     rclcpp::init(argc, argv);
-    auto node = rclcpp::Node::make_shared("dual_arm_ctrl");
+    auto node = rclcpp::Node::make_shared("rc_ctrl_node");
 
-    // Read connection and topic parameters (defaults match RC_ctrl.launch.py).
-    string left_ip = node->declare_parameter<string>("robot_left_ip", "192.168.71.37");
-    string right_ip = node->declare_parameter<string>("robot_right_ip", "192.168.71.36");
-    string left_topic = node->declare_parameter<string>("left_target_topic", "/rc_ctrl/left_target");
-    string right_topic = node->declare_parameter<string>("right_target_topic", "/rc_ctrl/right_target");
+    // Which arm this process controls. The JAKA SDK limits us to one connection
+    // per process, so one instance drives exactly one arm and the launch file
+    // starts two instances (arm_name left / right).
+    arm_name = node->declare_parameter<string>("arm_name", "left");
+    bool is_right = (arm_name == "right");
+    string default_ip = is_right ? "192.168.71.36" : "192.168.71.37";
+    string default_topic = is_right ? "/rc_ctrl/right_target" : "/rc_ctrl/left_target";
+    int default_grip_axis = is_right ? 1 : 0;
+
+    // Read connection/topic parameters (defaults match RC_ctrl.launch.py).
+    string ip = node->declare_parameter<string>("robot_ip", default_ip);
+    string target_topic = node->declare_parameter<string>("target_topic", default_topic);
     string button_topic = node->declare_parameter<string>("button_topic", "/rc_ctrl/button");
-    // Bring each arm fully online. Done sequentially (not login-both-then-setup)
-    // so an arm isn't left idle between login and power_on while the other arm's
-    // login blocks — that idle gap is what made power_on fail with
-    // ERR_COMMUNICATION_ERR right after a successful login.
-    left_ok = bring_up_arm(left_robot, left_ip, "left");
-    right_ok = bring_up_arm(right_robot, right_ip, "right");
+    grip_axis = node->declare_parameter<int>("grip_axis", default_grip_axis);
 
-    // Subscribe to the two handle target topics.
-    auto left_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
-        left_topic, 10, left_target_callback);
-    auto right_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
-        right_topic, 10, right_target_callback);
+    arm_ok = bring_up_arm(robot, ip, arm_name.c_str());
+
+    // Subscribe to the handle target topic and the shared button topic.
+    auto target_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
+        target_topic, 10, target_callback);
     auto button_sub = node->create_subscription<sensor_msgs::msg::Joy>(
         button_topic, 10, button_callback);
 
     RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
-                "dual_arm_ctrl started, tracking %s (left) and %s (right)",
-                left_topic.c_str(), right_topic.c_str());
+                "rc_ctrl_node started: arm=%s, ip=%s, tracking %s (grip axis %d)",
+                arm_name.c_str(), ip.c_str(), target_topic.c_str(), grip_axis);
 
     rclcpp::spin(node);
 
-    // Graceful shutdown. Only touch arms that actually connected: calling
+    // Graceful shutdown. Only touch the arm if it actually connected: calling
     // servo_move_enable/login_out on a disconnected arm blocks until the SDK
     // gives up, which hangs Ctrl-C and forces a SIGKILL — and a SIGKILL leaves
     // a stale session on the controller, blocking the next login.
-    if (left_ok)
+    if (arm_ok)
     {
-        left_robot.servo_move_enable(false);
-        left_robot.login_out();
-    }
-    if (right_ok)
-    {
-        right_robot.servo_move_enable(false);
-        right_robot.login_out();
+        robot.servo_move_enable(false);
+        robot.login_out();
     }
     rclcpp::shutdown();
     return 0;
