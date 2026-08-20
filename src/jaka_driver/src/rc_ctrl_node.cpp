@@ -38,11 +38,19 @@ map<int, string> mapErr = {
 // the launch file starts two instances (one per arm).
 JAKAZuRobot robot;
 
+// Controller pose: translation (mm) + orientation (quaternion). Orientation is
+// kept as a quaternion end-to-end so the per-cycle incremental rotation is
+// computed correctly; RPY is derived only for the final servo_p delta.
+struct CtrlPose {
+    CartesianTran tran;   // mm
+    Quaternion   quat;    // s == w (SDK scalar == ROS w)
+};
+
 // Teleop state: whether the grip is currently held, the controller pose captured
 // at the press instant, and the latest controller pose.
 bool gripped = false;
-CartesianPose ctrl_origin;   // controller pose at grip press (origin)
-CartesianPose ctrl_prev;     // last controller pose we commanded
+CtrlPose ctrl_origin;   // controller pose at grip press (origin)
+CtrlPose ctrl_prev;     // last controller pose we commanded
 geometry_msgs::msg::PoseStamped::SharedPtr latest;
 // Whether the arm connected successfully at startup (login_in == 0). A failed
 // arm is skipped for power_on/enable/servo.
@@ -50,39 +58,44 @@ bool arm_ok = false;
 std::string arm_name = "left";
 int grip_axis = 0;           // index into Joy.axes: 0 = leftGrip, 1 = rightGrip
 
-// Convert a PoseStamped (position in meters + quaternion) into a JAKA
-// CartesianPose (translation in mm + RPY in radians).
-bool pose_to_cartesian(JAKAZuRobot &robot,
-                       const geometry_msgs::msg::PoseStamped::SharedPtr msg,
-                       CartesianPose &pose)
+// Quaternion is (s, x, y, z) with s the scalar, matching ROS (w, x, y, z).
+Quaternion quat_conjugate(const Quaternion &q)
+{
+    // Inverse of a unit quaternion == conjugate (negate the vector part).
+    Quaternion r;
+    r.s = q.s;
+    r.x = -q.x;
+    r.y = -q.y;
+    r.z = -q.z;
+    return r;
+}
+
+// Hamilton product a * b  ("apply b, then a").
+Quaternion quat_mul(const Quaternion &a, const Quaternion &b)
+{
+    Quaternion r;
+    r.s = a.s * b.s - a.x * b.x - a.y * b.y - a.z * b.z;
+    r.x = a.s * b.x + a.x * b.s + a.y * b.z - a.z * b.y;
+    r.y = a.s * b.y - a.x * b.z + a.y * b.s + a.z * b.x;
+    r.z = a.s * b.z + a.x * b.y - a.y * b.x + a.z * b.s;
+    return r;
+}
+
+// Convert a PoseStamped (position in meters + quaternion) into a controller pose
+// (translation in mm + quaternion). No RPY conversion here — the RPY delta is
+// computed from quaternions in servo_cartesian().
+void pose_to_ctrl(const geometry_msgs::msg::PoseStamped::SharedPtr msg,
+                  CtrlPose &pose)
 {
     // ROS uses meters, the JAKA SDK uses millimeters.
     pose.tran.x = msg->pose.position.x * 1000.0;
     pose.tran.y = msg->pose.position.y * 1000.0;
     pose.tran.z = msg->pose.position.z * 1000.0;
 
-    Quaternion quat;
-    quat.s = msg->pose.orientation.w;
-    quat.x = msg->pose.orientation.x;
-    quat.y = msg->pose.orientation.y;
-    quat.z = msg->pose.orientation.z;
-
-    RotMatrix rot;
-    Rpy rpy;
-    if (robot.quaternion_to_rot_matrix(&quat, &rot) != 0)
-    {
-        return false;
-    }
-    if (robot.rot_matrix_to_rpy(&rot, &rpy) != 0)
-    {
-        return false;
-    }
-
-    pose.rpy.rx = rpy.rx;
-    pose.rpy.ry = rpy.ry;
-    pose.rpy.rz = rpy.rz;
-
-    return true;
+    pose.quat.s = msg->pose.orientation.w;
+    pose.quat.x = msg->pose.orientation.x;
+    pose.quat.y = msg->pose.orientation.y;
+    pose.quat.z = msg->pose.orientation.z;
 }
 
 // Per-cycle Cartesian servo limits. servo_p is fed one increment per 8 ms
@@ -90,19 +103,8 @@ bool pose_to_cartesian(JAKAZuRobot &robot,
 // SERVO_MAX_ROT_STEP / 0.008 ~= 36 deg/s.
 constexpr double SERVO_TRAN_DEADBAND = 0.5;   // mm: ignore smaller translation deltas
 constexpr double SERVO_ROT_DEADBAND = 0.005;  // rad (~0.29 deg): ignore smaller rotation deltas
-constexpr double SERVO_MAX_TRAN_STEP = 1.0;   // mm per cycle (~125 mm/s)
-constexpr double SERVO_MAX_ROT_STEP = 0.005;  // rad per cycle (~36 deg/s)
-
-// Wrap an angle difference to [-pi, pi] so orientation deltas don't jump by 2pi
-// when the controller pose crosses the +/-pi boundary.
-double wrap_pi(double a)
-{
-    while (a > M_PI)
-        a -= 2.0 * M_PI;
-    while (a < -M_PI)
-        a += 2.0 * M_PI;
-    return a;
-}
+constexpr double SERVO_MAX_TRAN_STEP = 5.0;   // mm per cycle (~125 mm/s)
+constexpr double SERVO_MAX_ROT_STEP = 0.05;  // rad per cycle (~36 deg/s)
 
 // Drive one arm to track the controller's displacement since grip press, in
 // Cartesian space. servo_p is sent one per-cycle INCR delta — the same
@@ -111,40 +113,41 @@ double wrap_pi(double a)
 // increments, the arm ends up exactly at "origin + offset", returns to start
 // when the controller returns to its origin, and holds when we stop sending.
 // No IK and no read-back, so nothing can diverge/oscillate.
+//
+// The incremental ROTATION is computed from quaternions (q_now * q_prev^-1) and
+// only then converted to RPY: subtracting two absolute RPYs does not yield the
+// incremental rotation (RPY is non-linear and gimbal-lock singular).
 void servo_cartesian(JAKAZuRobot &robot,
                      const geometry_msgs::msg::PoseStamped::SharedPtr msg,
-                     const CartesianPose &ctrl_origin,
-                     CartesianPose &ctrl_prev,
+                     const CtrlPose &ctrl_origin,
+                     CtrlPose &ctrl_prev,
                      const char *arm_name)
 {
-    CartesianPose ctrl_now;
-    if (!pose_to_cartesian(robot, msg, ctrl_now))
-    {
-        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                    "[%s] failed to convert pose to CartesianPose", arm_name);
-        return;
-    }
+    CtrlPose ctrl_now;
+    pose_to_ctrl(msg, ctrl_now);
 
-    // Total offset from the grip-press origin — the semantic "where the arm
-    // should be". Printed for debugging; not sent directly.
-    CartesianPose offset;
-    offset.tran.x = ctrl_now.tran.x - ctrl_origin.tran.x;
-    offset.tran.y = ctrl_now.tran.y - ctrl_origin.tran.y;
-    offset.tran.z = ctrl_now.tran.z - ctrl_origin.tran.z;
-    offset.rpy.rx = wrap_pi(ctrl_now.rpy.rx - ctrl_origin.rpy.rx);
-    offset.rpy.ry = wrap_pi(ctrl_now.rpy.ry - ctrl_origin.rpy.ry);
-    offset.rpy.rz = wrap_pi(ctrl_now.rpy.rz - ctrl_origin.rpy.rz);
-
-    // Per-cycle increment = offset_now - offset_prev. INCR accumulates these, so
-    // the running sum equals `offset` and the arm tracks the origin-relative
-    // displacement without ever double-counting pending motion.
     CartesianPose incr;
+    // Per-cycle translation increment (vector subtraction is exact).
     incr.tran.x = ctrl_now.tran.x - ctrl_prev.tran.x;
     incr.tran.y = ctrl_now.tran.y - ctrl_prev.tran.y;
     incr.tran.z = ctrl_now.tran.z - ctrl_prev.tran.z;
-    incr.rpy.rx = wrap_pi(ctrl_now.rpy.rx - ctrl_prev.rpy.rx);
-    incr.rpy.ry = wrap_pi(ctrl_now.rpy.ry - ctrl_prev.rpy.ry);
-    incr.rpy.rz = wrap_pi(ctrl_now.rpy.rz - ctrl_prev.rpy.rz);
+
+    // Per-cycle orientation increment: q_incr = q_now * q_prev^-1, a
+    // near-identity rotation that converts back to RPY without singularities.
+    Quaternion q_incr = quat_mul(ctrl_now.quat, quat_conjugate(ctrl_prev.quat));
+    RotMatrix rot_incr;
+    if (robot.quaternion_to_rot_matrix(&q_incr, &rot_incr) != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] failed to convert quaternion to rot matrix", arm_name);
+        return;
+    }
+    if (robot.rot_matrix_to_rpy(&rot_incr, &incr.rpy) != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] failed to convert rot matrix to RPY", arm_name);
+        return;
+    }
 
     // Deadband: hold in place instead of chasing sub-mm / sub-degree handle noise.
     double max_tran = std::max(std::fabs(incr.tran.x),
@@ -171,6 +174,9 @@ void servo_cartesian(JAKAZuRobot &robot,
         incr.rpy.ry *= s;
         incr.rpy.rz *= s;
     }
+    incr.rpy.rx=-incr.rpy.rx;
+    incr.rpy.ry=-incr.rpy.ry;
+    incr.rpy.rz=-incr.rpy.rz;
 
     int ret = robot.servo_p(&incr, MoveMode::INCR);
     if (ret != 0)
@@ -184,35 +190,53 @@ void servo_cartesian(JAKAZuRobot &robot,
     // from the same reference the robot is using.
     ctrl_prev = ctrl_now;
 
-    // DEBUG: throttled print of the total offset and the per-cycle increment.
+    // DEBUG: throttled print of the total translation offset and the per-cycle
+    // incremental rotation (the quaternion-derived RPY delta).
     static int dbg_count = 0;
     if (++dbg_count % 25 == 0)
     {
         RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
-                    "[%s] offset=(%.1f,%.1f,%.1f)mm rpy=(%.3f,%.3f,%.3f)rad incr=(%.2f,%.2f,%.2f)mm rincr=(%.4f,%.4f,%.4f)rad",
+                    "[%s] offset=(%.1f,%.1f,%.1f)mm incr=(%.2f,%.2f,%.2f)mm rincr=(%.4f,%.4f,%.4f)rad",
                     arm_name,
-                    offset.tran.x, offset.tran.y, offset.tran.z,
-                    offset.rpy.rx, offset.rpy.ry, offset.rpy.rz,
+                    ctrl_now.tran.x - ctrl_origin.tran.x,
+                    ctrl_now.tran.y - ctrl_origin.tran.y,
+                    ctrl_now.tran.z - ctrl_origin.tran.z,
                     incr.tran.x, incr.tran.y, incr.tran.z,
                     incr.rpy.rx, incr.rpy.ry, incr.rpy.rz);
     }
 }
 
+void servo_hold(JAKAZuRobot &robot)
+{
+    CartesianPose hold;
+    hold.tran.x = 0.0;
+    hold.tran.y = 0.0;
+    hold.tran.z = 0.0;
+    hold.rpy.rx = 0.0;
+    hold.rpy.ry = 0.0;
+    hold.rpy.rz = 0.0;
+    int ret = robot.servo_p(&hold, MoveMode::INCR);
+    if (ret != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] servo_p HOLD failed: %s", arm_name.c_str(), mapErr[ret].c_str());
+    }
+}
 // Update the grip state for one arm. On the rising edge (grip crosses 0.5) we
 // capture the controller pose and the arm's current TCP as the two origins; on
 // release we stop commanding so the arm holds its last position.
 void handle_grip(bool &gripped, float value,
                  const geometry_msgs::msg::PoseStamped::SharedPtr &latest,
-                 JAKAZuRobot &robot,
-                 CartesianPose &ctrl_origin,
-                 CartesianPose &ctrl_prev,
+                 CtrlPose &ctrl_origin,
+                 CtrlPose &ctrl_prev,
                  const char *arm_name)
 {
     bool now = value > 0.5f;
     if (now && !gripped)
     {
-        if (latest && pose_to_cartesian(robot, latest, ctrl_origin))
+        if (latest)
         {
+            pose_to_ctrl(latest, ctrl_origin);
             ctrl_prev = ctrl_origin;
             gripped = true;
             RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
@@ -236,6 +260,10 @@ void target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         servo_cartesian(robot, msg, ctrl_origin, ctrl_prev, arm_name.c_str());
     }
+    else//if not gripped
+    {
+        servo_hold(robot);
+    }
 }
 
 void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -243,7 +271,7 @@ void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
     float grip = msg->axes.size() > static_cast<size_t>(grip_axis)
                      ? msg->axes[grip_axis] : 0.0f;
     if (arm_ok)
-        handle_grip(gripped, grip, latest, robot,
+        handle_grip(gripped, grip, latest,
                     ctrl_origin, ctrl_prev, arm_name.c_str());
 }
 
