@@ -1,10 +1,10 @@
 """读取 Quest VR 眼镜位姿并发布为双臂伺服目标。
 
 默认通过 adb logcat 实时读取眼镜 APK 输出的手柄数据（标签由参数 adb_tag
-指定），逐行解析左右两个手柄的 4x4 齐次变换矩阵（平移米 + 旋转矩阵），先对
-旋转矩阵转置再左乘一个固定正当旋转，对齐手柄↔rpy 的轴（手柄 x->rx, y->ry,
-z->rz），再转成四元数并做一阶低通滤波，经「眼镜帧 -> 机器人基帧」的静态 TF
-变换后，发布两个 PoseStamped 给 rc_ctrl_node 做绝对伺服跟踪（控制频率 125 Hz）。
+指定），逐行解析左右两个手柄的 4x4 齐次变换矩阵（平移米 + 旋转矩阵），对旋转
+矩阵转置（还原列主序输出）后转成四元数并做一阶低通滤波，经「眼镜帧 -> 机器人
+基帧」的静态 TF 变换后，发布两个 PoseStamped 给 rc_ctrl_node 做绝对伺服跟踪
+（控制频率 125 Hz）。
 
 若设置了参数 command，则改为从该子进程的 stdout 读取（离线测试用）。
 """
@@ -153,19 +153,24 @@ def rot_matrix_to_quaternion(R):
 
 def matrix_to_pose(matrix):
     """4x4 齐次矩阵 -> (平移 3 向量, 四元数 [w,x,y,z])。"""
+
     init_trans = matrix[0:3, 3]  # 平移（米）
     trans = np.array([-init_trans[2], -init_trans[0], init_trans[1]])
 
-    R = matrix[0:3, 0:3]
-    # 对齐手柄 -> 机器人 rpy 轴（目标 手柄 x->rx, y->ry, z->rz）。
-    # 实测原始矩阵（不做任何修正）的手柄->rpy「增量」映射是 x->rz, y->-rx, z->ry，
-    # 即 rpy = P@h，P = [[0,-1,0],[0,0,1],[1,0,0]]，det(P)=-1（镜像）。链条里存在一次
-    # 转置/手性翻转，单靠左乘正当旋转无法表达，故先转置 R.T 再左乘正当旋转 C=-P^T：
-    # C@R.T 永远是正当旋转（det=+1），且把增量映射修正为恒等（x->rx, y->ry, z->rz）。
-    C = np.array([[0.0, 0.0, -1.0],
-                  [1.0, 0.0, 0.0],
-                  [0.0, -1.0, 0.0]])
-    R = C @ R.T
+    matrix = np.array(matrix)
+    R = np.array(matrix[0:3, 0:3])
+    
+    # APK 按列主序输出 4x4，逐行解析后旋转矩阵是真正旋转的转置，转置一次还原为
+    # 手柄在眼镜坐标系下的真实朝向（det=+1 的正当旋转）。
+        # ----- 修正 X 轴与 Y 轴对调 -----
+    # 定义交换 X 和 Y 的置换矩阵（P = P^T = P^{-1}）
+    P = np.array([[0, 1, 0],
+                  [1, 0, 0],
+                  [0, 0, 1]])
+    
+    # 相似变换：同时交换行和列，保持 det=+1，确保仍为合法旋转矩阵
+    R = P @ R @ P   # 等价于 P @ R @ P.T
+    R = R.T
     quat = rot_matrix_to_quaternion(R)
     return trans, quat
 
