@@ -294,11 +294,11 @@ void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
     }
 }
 
-// Bring one arm fully online: login -> power_on -> enable -> servo. Mirrors the
-// jaka_driver reference sequence (wait 8 s after power_on and 4 s after enable
-// so the robot actually reaches the powered/enabled state before servo). Returns
-// true only if every step succeeded; on failure the arm is left un-driven and
-// the callbacks skip it.
+// Bring one arm fully online: login -> configure TIO -> power_on -> enable ->
+// servo. Mirrors the jaka_driver reference sequence (wait 8 s after power_on
+// and 4 s after enable so the robot reaches the powered/enabled state before
+// servo). Returns true only if every step succeeded; on failure the arm is
+// left un-driven and the callbacks skip it.
 bool bring_up_arm(JAKAZuRobot &robot, const std::string &ip, const char *arm)
 {
     int ret = robot.login_in(ip.c_str());
@@ -313,6 +313,32 @@ bool bring_up_arm(JAKAZuRobot &robot, const std::string &ip, const char *arm)
     // Same SDK setup the reference node applies right after login.
     robot.set_status_data_update_time_interval(100);
     robot.set_block_wait_timeout(120);
+
+    // Configure the TIO while the controller is logged in but before the arm
+    // enters servo mode. JAKA controllers may reject pin-mode changes once
+    // servo motion is active.
+    if (gripper != nullptr)
+    {
+        std::string error;
+        if (!gripper->initialize(&error))
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] PGI gripper disabled: %s", arm_name.c_str(), error.c_str());
+            gripper.reset();
+        }
+        else
+        {
+            const auto & config = gripper->config();
+            RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] PGI-140-80 ready: RS485 channel=%d slave=%d force=%d%% speed=%d%% "
+                        "open=%d closed=%d trigger axis=%d%s button=%d",
+                        arm_name.c_str(), config.rs485_channel, config.slave_id,
+                        config.force_percent, config.speed_percent,
+                        config.open_position, config.closed_position,
+                        gripper_axis, gripper_use_button ? " (digital button)" : "",
+                        gripper_use_button ? gripper_button_index : -1);
+        }
+    }
 
     ret = robot.power_on();
     if (ret != 0)
@@ -401,7 +427,7 @@ int main(int argc, char *argv[])
     }
 
     pgi140::GripperConfig gripper_config;
-    gripper_config.rs485_channel = node->declare_parameter<int>("gripper_rs485_channel", 0);
+    gripper_config.rs485_channel = node->declare_parameter<int>("gripper_rs485_channel", 1);
     gripper_config.slave_id = node->declare_parameter<int>("gripper_slave_id", 1);
     gripper_config.baudrate = node->declare_parameter<int>("gripper_baudrate", 115200);
     gripper_config.force_percent = node->declare_parameter<int>("gripper_force", 50);
@@ -414,34 +440,18 @@ int main(int argc, char *argv[])
         "gripper_initialize_command", 0x01);
     gripper_config.initialize_delay_ms = node->declare_parameter<int>(
         "gripper_initialize_delay_ms", 2000);
+    gripper_config.configure_tio = node->declare_parameter<bool>(
+        "gripper_configure_tio", true);
     gripper_config.enable_tio_power = node->declare_parameter<bool>(
         "gripper_enable_tio_power", true);
     gripper_config.tio_voltage = node->declare_parameter<int>(
         "gripper_tio_voltage", 0);
 
+    gripper = std::make_unique<pgi140::Pgi140Gripper>(robot, gripper_config);
     arm_ok = bring_up_arm(robot, ip, arm_name.c_str());
-
-    if (arm_ok)
+    if (!arm_ok)
     {
-        gripper = std::make_unique<pgi140::Pgi140Gripper>(robot, gripper_config);
-        std::string error;
-        if (!gripper->initialize(&error))
-        {
-            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                        "[%s] PGI gripper disabled: %s", arm_name.c_str(), error.c_str());
-            gripper.reset();
-        }
-        else
-        {
-            RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
-                        "[%s] PGI-140-80 ready: RS485 channel=%d slave=%d force=%d%% speed=%d%% "
-                        "open=%d closed=%d trigger axis=%d%s button=%d",
-                        arm_name.c_str(), gripper_config.rs485_channel, gripper_config.slave_id,
-                        gripper_config.force_percent, gripper_config.speed_percent,
-                        gripper_config.open_position, gripper_config.closed_position,
-                        gripper_axis, gripper_use_button ? " (digital button)" : "",
-                        gripper_use_button ? gripper_button_index : -1);
-        }
+        gripper.reset();
     }
 
     // Subscribe to the handle target topic and the shared button topic.

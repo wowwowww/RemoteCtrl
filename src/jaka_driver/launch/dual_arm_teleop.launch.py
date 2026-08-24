@@ -23,8 +23,8 @@ def generate_launch_description():
         'gripper_baudrate', default_value='115200',
         description='PGI RS485 baud rate (default 115200)')
     gripper_rs485_channel_arg = DeclareLaunchArgument(
-        'gripper_rs485_channel', default_value='0',
-        description='JAKA TIO RS485 channel: 0=RS485H, 1=RS485L')
+        'gripper_rs485_channel', default_value='1',
+        description='JAKA SDK RS485 channel: 0=RS485H/TIO channel 1, 1=RS485L/TIO channel 2')
     gripper_slave_id_arg = DeclareLaunchArgument(
         'gripper_slave_id', default_value='1', description='PGI Modbus slave ID')
     gripper_open_position_arg = DeclareLaunchArgument(
@@ -45,6 +45,9 @@ def generate_launch_description():
     gripper_initialize_delay_arg = DeclareLaunchArgument(
         'gripper_initialize_delay_ms', default_value='2000',
         description='Wait time after PGI initialization command')
+    gripper_configure_tio_arg = DeclareLaunchArgument(
+        'gripper_configure_tio', default_value='true',
+        description='Configure TIO via SDK; false uses the JAKA App saved configuration')
     gripper_enable_tio_power_arg = DeclareLaunchArgument(
         'gripper_enable_tio_power', default_value='true',
         description='Enable JAKA TIO voltage output for the grippers')
@@ -84,6 +87,7 @@ def generate_launch_description():
             'gripper_initialize': LaunchConfiguration('gripper_initialize'),
             'gripper_initialize_command': LaunchConfiguration('gripper_initialize_command'),
             'gripper_initialize_delay_ms': LaunchConfiguration('gripper_initialize_delay_ms'),
+            'gripper_configure_tio': LaunchConfiguration('gripper_configure_tio'),
             'gripper_enable_tio_power': LaunchConfiguration('gripper_enable_tio_power'),
             'gripper_tio_voltage': LaunchConfiguration('gripper_tio_voltage'),
             'gripper_use_button': LaunchConfiguration('gripper_use_button'),
@@ -105,6 +109,7 @@ def generate_launch_description():
         gripper_initialize_arg,
         gripper_initialize_command_arg,
         gripper_initialize_delay_arg,
+        gripper_configure_tio_arg,
         gripper_enable_tio_power_arg,
         gripper_tio_voltage_arg,
         gripper_use_button_arg,

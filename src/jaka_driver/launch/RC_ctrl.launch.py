@@ -47,8 +47,8 @@ def generate_launch_description():
         'gripper_baudrate', default_value='115200',
         description='PGI RS485 baud rate (default 115200)')
     gripper_rs485_channel_arg = DeclareLaunchArgument(
-        'gripper_rs485_channel', default_value='0',
-        description='JAKA TIO RS485 channel: 0=RS485H, 1=RS485L')
+        'gripper_rs485_channel', default_value='1',
+        description='JAKA SDK RS485 channel: 0=RS485H/TIO channel 1, 1=RS485L/TIO channel 2')
     gripper_slave_id_arg = DeclareLaunchArgument(
         'gripper_slave_id', default_value='1',
         description='PGI Modbus slave ID')
@@ -70,6 +70,9 @@ def generate_launch_description():
     gripper_initialize_delay_arg = DeclareLaunchArgument(
         'gripper_initialize_delay_ms', default_value='2000',
         description='Wait time after PGI initialization command')
+    gripper_configure_tio_arg = DeclareLaunchArgument(
+        'gripper_configure_tio', default_value='true',
+        description='Configure TIO via SDK; false uses the JAKA App saved configuration')
     gripper_enable_tio_power_arg = DeclareLaunchArgument(
         'gripper_enable_tio_power', default_value='true',
         description='Enable JAKA TIO voltage output for the gripper')
@@ -111,6 +114,7 @@ def generate_launch_description():
             'gripper_initialize': ParameterValue(LaunchConfiguration('gripper_initialize'), value_type=bool),
             'gripper_initialize_command': ParameterValue(LaunchConfiguration('gripper_initialize_command'), value_type=int),
             'gripper_initialize_delay_ms': ParameterValue(LaunchConfiguration('gripper_initialize_delay_ms'), value_type=int),
+            'gripper_configure_tio': ParameterValue(LaunchConfiguration('gripper_configure_tio'), value_type=bool),
             'gripper_enable_tio_power': ParameterValue(LaunchConfiguration('gripper_enable_tio_power'), value_type=bool),
             'gripper_tio_voltage': ParameterValue(LaunchConfiguration('gripper_tio_voltage'), value_type=int),
             'gripper_use_button': ParameterValue(LaunchConfiguration('gripper_use_button'), value_type=bool),
@@ -141,6 +145,7 @@ def generate_launch_description():
             'gripper_initialize': ParameterValue(LaunchConfiguration('gripper_initialize'), value_type=bool),
             'gripper_initialize_command': ParameterValue(LaunchConfiguration('gripper_initialize_command'), value_type=int),
             'gripper_initialize_delay_ms': ParameterValue(LaunchConfiguration('gripper_initialize_delay_ms'), value_type=int),
+            'gripper_configure_tio': ParameterValue(LaunchConfiguration('gripper_configure_tio'), value_type=bool),
             'gripper_enable_tio_power': ParameterValue(LaunchConfiguration('gripper_enable_tio_power'), value_type=bool),
             'gripper_tio_voltage': ParameterValue(LaunchConfiguration('gripper_tio_voltage'), value_type=int),
             'gripper_use_button': ParameterValue(LaunchConfiguration('gripper_use_button'), value_type=bool),
@@ -166,6 +171,7 @@ def generate_launch_description():
         gripper_initialize_arg,
         gripper_initialize_command_arg,
         gripper_initialize_delay_arg,
+        gripper_configure_tio_arg,
         gripper_enable_tio_power_arg,
         gripper_tio_voltage_arg,
         gripper_use_button_arg,

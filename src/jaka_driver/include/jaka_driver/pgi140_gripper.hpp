@@ -11,7 +11,7 @@ namespace pgi140
 
 struct GripperConfig
 {
-  int rs485_channel = 0;       // 0: TIO RS485H, 1: TIO RS485L
+  int rs485_channel = 1;       // 0: TIO RS485H, 1: TIO RS485L (TIO channel 2)
   int slave_id = 1;
   int baudrate = 115200;
   int databit = 8;
@@ -24,6 +24,7 @@ struct GripperConfig
   bool initialize = true;
   int initialize_command = 0x01;
   int initialize_delay_ms = 2000;
+  bool configure_tio = true;   // false: use the TIO configuration saved in JAKA App
   bool enable_tio_power = true;
   int tio_voltage = 0;         // JAKA TIO_VOUT_24V = 0, TIO_VOUT_12V = 1
 };

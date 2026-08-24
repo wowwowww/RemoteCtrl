@@ -18,9 +18,17 @@ code `0x06` writes:
 | `0x0103` | target position | `0..1000` per mille |
 | `0x0104` | speed | `1..100` percent |
 
-`gripper_rs485_channel=0` configures TIO RS485H (DO1/DO2); `1` configures
-TIO RS485L (AIN1/AIN2). The driver enables TIO voltage output at 24 V by
-default. Confirm the actual TIO wiring and supply before powering hardware.
+`gripper_rs485_channel=0` configures TIO RS485H (DO1/DO2, TIO channel 1);
+`1` configures TIO RS485L (AIN1/AIN2, TIO channel 2). The default is `1`,
+matching the PGI-compatible TIO wiring used by the local JAKA driver. The
+driver enables TIO voltage output at 24 V by default. Confirm the actual TIO
+wiring and supply before powering hardware. TIO pin/RS485 configuration is
+performed immediately after `login_in`, before robot power and servo mode are
+enabled; some controllers reject pin-mode changes after servo mode starts.
+If the TIO channel has already been configured in the JAKA App and the
+controller rejects runtime configuration, use `gripper_configure_tio:=false`.
+The saved configuration must still match the selected channel, `115200 8N1`,
+Modbus RTU mode, and the PGI slave ID.
 
 ## Quest mapping
 
@@ -50,7 +58,8 @@ ros2 launch jaka_driver dual_arm_teleop.launch.py \
 
 Useful overrides include `gripper_open_position`, `gripper_closed_position`,
 `gripper_rs485_channel`, `gripper_slave_id`, `gripper_baudrate`,
-`gripper_initialize_command` and `gripper_enable_tio_power`. Keep
+`gripper_configure_tio`, `gripper_initialize_command` and
+`gripper_enable_tio_power`. Keep
 `gripper_initialize:=true` after changing
 fingers or the saved PGI travel calibration; initialization can move the jaws
 for up to about three seconds.

@@ -82,25 +82,32 @@ bool Pgi140Gripper::initialize(std::string * error)
     return fail("set_tio_vout_param failed", error);
   }
 
-  // TIO RS485H reuses DO1/DO2; RS485L reuses AIN1/AIN2.
-  const int pin_ret = config_.rs485_channel == 0 ?
-    robot_.set_tio_pin_mode(1, 0xFF) : robot_.set_tio_pin_mode(2, 1);
-  if (pin_ret != ERR_SUCC) {
-    return fail("set_tio_pin_mode failed", error);
-  }
-  if (robot_.set_rs485_chn_mode(config_.rs485_channel, 0) != ERR_SUCC) {
-    return fail("set_rs485_chn_mode(Modbus RTU) failed", error);
-  }
+  if (config_.configure_tio) {
+    // TIO RS485H reuses DO1/DO2; RS485L reuses AIN1/AIN2.
+    const int pin_ret = config_.rs485_channel == 0 ?
+      robot_.set_tio_pin_mode(1, 0xFF) : robot_.set_tio_pin_mode(2, 1);
+    if (pin_ret != ERR_SUCC) {
+      return fail(
+        "set_tio_pin_mode failed (SDK code " + std::to_string(pin_ret) +
+        "); SDK channel " + std::to_string(config_.rs485_channel) +
+        " maps to TIO RS485 channel " + std::to_string(config_.rs485_channel + 1) +
+        "; verify TIO channel selection and controller TIO hardware/configuration, "
+        "or set gripper_configure_tio=false after configuring TIO in JAKA App", error);
+    }
+    if (robot_.set_rs485_chn_mode(config_.rs485_channel, 0) != ERR_SUCC) {
+      return fail("set_rs485_chn_mode(Modbus RTU) failed", error);
+    }
 
-  ModRtuComm comm{};
-  comm.chn_id = config_.rs485_channel;
-  comm.slaveId = config_.slave_id;
-  comm.baudrate = config_.baudrate;
-  comm.databit = config_.databit;
-  comm.stopbit = config_.stopbit;
-  comm.parity = config_.parity;
-  if (robot_.set_rs485_chn_comm(comm) != ERR_SUCC) {
-    return fail("set_rs485_chn_comm failed", error);
+    ModRtuComm comm{};
+    comm.chn_id = config_.rs485_channel;
+    comm.slaveId = config_.slave_id;
+    comm.baudrate = config_.baudrate;
+    comm.databit = config_.databit;
+    comm.stopbit = config_.stopbit;
+    comm.parity = config_.parity;
+    if (robot_.set_rs485_chn_comm(comm) != ERR_SUCC) {
+      return fail("set_rs485_chn_comm failed", error);
+    }
   }
 
   configured_ = true;
