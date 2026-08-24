@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <memory>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -12,6 +13,7 @@
 #include "jaka_driver/JAKAZuRobot.h"
 #include "jaka_driver/jkerr.h"
 #include "jaka_driver/jktypes.h"
+#include "jaka_driver/pgi140_gripper.hpp"
 
 using namespace std;
 
@@ -57,6 +59,11 @@ geometry_msgs::msg::PoseStamped::SharedPtr latest;
 bool arm_ok = false;
 std::string arm_name = "left";
 int grip_axis = 0;           // index into Joy.axes: 0 = leftGrip, 1 = rightGrip
+int gripper_axis = 2;        // index trigger: 2 = leftTrig, 3 = rightTrig
+bool gripper_use_button = false;
+int gripper_button_index = 0;
+double gripper_trigger_threshold = 0.5;
+std::unique_ptr<pgi140::Pgi140Gripper> gripper;
 
 // Quaternion is (s, x, y, z) with s the scalar, matching ROS (w, x, y, z).
 Quaternion quat_conjugate(const Quaternion &q)
@@ -273,6 +280,46 @@ void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
     if (arm_ok)
         handle_grip(gripped, grip, latest,
                     ctrl_origin, ctrl_prev, arm_name.c_str());
+
+    if (gripper != nullptr)
+    {
+        bool pressed = false;
+        if (gripper_use_button)
+        {
+            pressed = msg->buttons.size() > static_cast<size_t>(gripper_button_index) &&
+                      msg->buttons[gripper_button_index] != 0;
+        }
+        else
+        {
+            float trigger = msg->axes.size() > static_cast<size_t>(gripper_axis)
+                              ? msg->axes[gripper_axis] : 0.0f;
+            pressed = trigger >= static_cast<float>(gripper_trigger_threshold);
+            // The Quest APK normally supplies the analog value, but some
+            // controller firmware reports only the digital LTr/RTr state.
+            // Accept either representation unless an alternate button-only
+            // mode was explicitly requested.
+            if (!pressed && msg->buttons.size() > static_cast<size_t>(gripper_button_index)) {
+                pressed = msg->buttons[gripper_button_index] != 0;
+            }
+        }
+
+        if (pressed != gripper->closed())
+        {
+            std::string error;
+            if (!gripper->set_closed(pressed, &error))
+            {
+                RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                            "[%s] PGI gripper command failed: %s",
+                            arm_name.c_str(), error.c_str());
+            }
+            else
+            {
+                RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                            "[%s] PGI gripper %s",
+                            arm_name.c_str(), pressed ? "closed" : "opened");
+            }
+        }
+    }
 }
 
 // Bring one arm fully online: login -> power_on -> enable -> servo. Mirrors the
@@ -359,7 +406,71 @@ int main(int argc, char *argv[])
     string button_topic = node->declare_parameter<string>("button_topic", "/rc_ctrl/button");
     grip_axis = node->declare_parameter<int>("grip_axis", default_grip_axis);
 
+    // PGI-140-80 is driven through the Quest index-trigger axis by default:
+    // Joy axes[2] = leftTrig and axes[3] = rightTrig. A Joy button index can
+    // be selected for controllers whose front button is reported digitally.
+    gripper_axis = node->declare_parameter<int>(
+        "gripper_axis", is_right ? 3 : 2);
+    gripper_use_button = node->declare_parameter<bool>("gripper_use_button", false);
+    const int configured_button_index = node->declare_parameter<int>(
+        "gripper_button_index", -1);
+    // Joy.buttons follows quest_reader's stable order; LTr=10 and RTr=11.
+    gripper_button_index = configured_button_index >= 0 ? configured_button_index :
+        (is_right ? 11 : 10);
+    gripper_trigger_threshold = node->declare_parameter<double>(
+        "gripper_trigger_threshold", 0.5);
+    if (!std::isfinite(gripper_trigger_threshold) ||
+        gripper_trigger_threshold < 0.0 || gripper_trigger_threshold > 1.0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] invalid gripper_trigger_threshold; using 0.5",
+                    arm_name.c_str());
+        gripper_trigger_threshold = 0.5;
+    }
+
+    pgi140::GripperConfig gripper_config;
+    gripper_config.rs485_channel = node->declare_parameter<int>("gripper_rs485_channel", 0);
+    gripper_config.slave_id = node->declare_parameter<int>("gripper_slave_id", 1);
+    gripper_config.baudrate = node->declare_parameter<int>("gripper_baudrate", 115200);
+    gripper_config.force_percent = node->declare_parameter<int>("gripper_force", 50);
+    gripper_config.speed_percent = node->declare_parameter<int>("gripper_speed", 50);
+    gripper_config.open_position = node->declare_parameter<int>("gripper_open_position", 0);
+    gripper_config.closed_position = node->declare_parameter<int>(
+        "gripper_closed_position", 1000);
+    gripper_config.initialize = node->declare_parameter<bool>("gripper_initialize", true);
+    gripper_config.initialize_command = node->declare_parameter<int>(
+        "gripper_initialize_command", 0x01);
+    gripper_config.initialize_delay_ms = node->declare_parameter<int>(
+        "gripper_initialize_delay_ms", 2000);
+    gripper_config.enable_tio_power = node->declare_parameter<bool>(
+        "gripper_enable_tio_power", true);
+    gripper_config.tio_voltage = node->declare_parameter<int>(
+        "gripper_tio_voltage", 0);
+
     arm_ok = bring_up_arm(robot, ip, arm_name.c_str());
+
+    if (arm_ok)
+    {
+        gripper = std::make_unique<pgi140::Pgi140Gripper>(robot, gripper_config);
+        std::string error;
+        if (!gripper->initialize(&error))
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] PGI gripper disabled: %s", arm_name.c_str(), error.c_str());
+            gripper.reset();
+        }
+        else
+        {
+            RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] PGI-140-80 ready: RS485 channel=%d slave=%d force=%d%% speed=%d%% "
+                        "open=%d closed=%d trigger axis=%d%s button=%d",
+                        arm_name.c_str(), gripper_config.rs485_channel, gripper_config.slave_id,
+                        gripper_config.force_percent, gripper_config.speed_percent,
+                        gripper_config.open_position, gripper_config.closed_position,
+                        gripper_axis, gripper_use_button ? " (digital button)" : "",
+                        gripper_use_button ? gripper_button_index : -1);
+        }
+    }
 
     // Subscribe to the handle target topic and the shared button topic.
     auto target_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -379,6 +490,16 @@ int main(int argc, char *argv[])
     // a stale session on the controller, blocking the next login.
     if (arm_ok)
     {
+        if (gripper != nullptr && gripper->closed())
+        {
+            std::string error;
+            if (!gripper->set_closed(false, &error))
+            {
+                RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                            "[%s] failed to open PGI gripper on shutdown: %s",
+                            arm_name.c_str(), error.c_str());
+            }
+        }
         robot.servo_move_enable(false);
         robot.login_out();
     }

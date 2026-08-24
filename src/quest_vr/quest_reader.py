@@ -191,9 +191,24 @@ def buttons_to_joy(buttons):
         v = buttons.get(key, (0.0, 0.0))
         return [float(v[0]), float(v[1])] if isinstance(v, (tuple, list)) else [0.0, 0.0]
 
+    def digital(key):
+        """Normalize a boolean or numeric tuple to a Joy button state."""
+        v = buttons.get(key, False)
+        if isinstance(v, (tuple, list)):
+            return int(any(abs(float(item)) >= 0.5 for item in v))
+        return int(bool(v))
+
     joy = Joy()
     joy.axes = [fv('leftGrip'), fv('rightGrip'),
                 fv('leftTrig'), fv('rightTrig')] + xy('leftJS') + xy('rightJS')
+    # Keep a stable digital-button layout for drivers that prefer a front
+    # button over the analog trigger axes. The PGI driver can select this
+    # layout with gripper_use_button=true and gripper_button_index=N.
+    digital_order = [
+        'X', 'Y', 'A', 'B', 'LThU', 'RThU',
+        'LJ', 'RJ', 'LG', 'RG', 'LTr', 'RTr',
+    ]
+    joy.buttons = [digital(key) for key in digital_order]
     return joy
 
 

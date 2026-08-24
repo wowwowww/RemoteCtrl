@@ -32,7 +32,11 @@ add_executable(jaka_driver src/jaka_driver.cpp)
 add_executable(sdk_test src/sdk_test.cpp)
 add_executable(client src/client.cpp)
 add_executable(servoj_demo src/servoj_demo.cpp)
-add_executable(rc_ctrl_node src/rc_ctrl_node.cpp)
+add_executable(rc_ctrl_node
+  src/rc_ctrl_node.cpp
+  src/pgi140_gripper.cpp
+  src/pgi140_protocol.cpp
+)
 
 # Link libraries
 ament_target_dependencies(jaka_driver
@@ -143,5 +147,19 @@ install(TARGETS
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
+
+install(FILES README_PGI140.md
+  DESTINATION share/${PROJECT_NAME}
+)
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(pgi140_protocol_test
+    test/pgi140_protocol_test.cpp
+    src/pgi140_protocol.cpp
+  )
+  target_include_directories(pgi140_protocol_test PRIVATE include)
+  add_test(NAME pgi140_protocol_test COMMAND pgi140_protocol_test)
+endif()
 
 ament_package()
