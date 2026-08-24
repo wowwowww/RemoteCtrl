@@ -469,7 +469,7 @@ int main(int argc, char *argv[])
     gripper_config.initialize_delay_ms = node->declare_parameter<int>(
         "gripper_initialize_delay_ms", 2000);
     gripper_config.configure_tio = node->declare_parameter<bool>(
-        "gripper_configure_tio", true);
+        "gripper_configure_tio", false);
     gripper_config.enable_tio_power = node->declare_parameter<bool>(
         "gripper_enable_tio_power", true);
     gripper_config.tio_voltage = node->declare_parameter<int>(

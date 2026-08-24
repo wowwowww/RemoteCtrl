@@ -46,7 +46,7 @@ def generate_launch_description():
         'gripper_initialize_delay_ms', default_value='2000',
         description='Wait time after PGI initialization command')
     gripper_configure_tio_arg = DeclareLaunchArgument(
-        'gripper_configure_tio', default_value='true',
+        'gripper_configure_tio', default_value='false',
         description='Configure TIO via SDK; false uses the JAKA App saved configuration')
     gripper_enable_tio_power_arg = DeclareLaunchArgument(
         'gripper_enable_tio_power', default_value='true',

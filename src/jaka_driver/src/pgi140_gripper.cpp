@@ -170,7 +170,7 @@ bool Pgi140Gripper::set_speed(int speed_percent, std::string * error)
 
 bool Pgi140Gripper::set_closed(bool closed, std::string * error)
 {
-  if (!set_position(closed ? config_.closed_position : config_.open_position, error)) {
+  if (!set_position(closed ? config_.open_position:config_.closed_position , error)) {
     return false;
   }
   closed_ = closed;
