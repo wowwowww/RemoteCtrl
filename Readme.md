@@ -2,6 +2,7 @@
 
 源码放置于/RemoteCtrl/src文件夹
 遥操作主要使用/jaka_driver、/quest_vr两个文件夹
+sdk_lib_version--2.2.2
 
 #项目编译与加载
 cd  workplace/RemoteCtrl
@@ -13,7 +14,7 @@ source ./install/setup.bash
 左192.168.71.37
 右192.168.71.36
 #vr头显与主机正常连接
-（#动态库文件选择正确）
+（#动态库文件正确）
 
 
 
