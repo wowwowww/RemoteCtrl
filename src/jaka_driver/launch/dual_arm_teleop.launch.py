@@ -16,7 +16,7 @@ def generate_launch_description():
         'robot_right_ip', default_value='192.168.71.36',
         description='IP address of the right JAKA robot')
     gripper_force_arg = DeclareLaunchArgument(
-        'gripper_force', default_value='50', description='PGI force percentage (20..100)')
+        'gripper_force', default_value='20', description='PGI force percentage (20..100)')
     gripper_speed_arg = DeclareLaunchArgument(
         'gripper_speed', default_value='50', description='PGI speed percentage (1..100)')
     gripper_baudrate_arg = DeclareLaunchArgument(
@@ -28,14 +28,17 @@ def generate_launch_description():
     gripper_slave_id_arg = DeclareLaunchArgument(
         'gripper_slave_id', default_value='1', description='PGI Modbus slave ID')
     gripper_open_position_arg = DeclareLaunchArgument(
-        'gripper_open_position', default_value='0',
+        'gripper_open_position', default_value='1000',
         description='PGI open target in per mille (0..1000)')
     gripper_closed_position_arg = DeclareLaunchArgument(
-        'gripper_closed_position', default_value='1000',
+        'gripper_closed_position', default_value='0',
         description='PGI closed target in per mille (0..1000)')
-    gripper_trigger_threshold_arg = DeclareLaunchArgument(
-        'gripper_trigger_threshold', default_value='0.5',
-        description='Quest index-trigger threshold (0..1)')
+    gripper_linear_arg = DeclareLaunchArgument(
+        'gripper_linear', default_value='true',
+        description='Use linear (analog axes) control for gripper by default')
+    gripper_trigger_deadband_arg = DeclareLaunchArgument(
+        'gripper_trigger_deadband', default_value='0.02',
+        description='Minimal change in analog trigger to send a new Grip()')
     gripper_initialize_arg = DeclareLaunchArgument(
         'gripper_initialize', default_value='true',
         description='Initialize PGI grippers during node startup')
@@ -60,6 +63,9 @@ def generate_launch_description():
     gripper_button_index_arg = DeclareLaunchArgument(
         'gripper_button_index', default_value='-1',
         description='Joy.buttons index; -1 selects left LTr=10 or right RTr=11')
+    debug_arg = DeclareLaunchArgument(
+        'debug', default_value='false',
+        description='Enable debug logging for rc_ctrl_node')
 
     # quest_reader publishes /rc_ctrl/button + /rc_ctrl/{left,right}_target from
     # the VR handles; rc_ctrl_node connects to the arms and servos on those topics.
@@ -83,7 +89,8 @@ def generate_launch_description():
             'gripper_slave_id': LaunchConfiguration('gripper_slave_id'),
             'gripper_open_position': LaunchConfiguration('gripper_open_position'),
             'gripper_closed_position': LaunchConfiguration('gripper_closed_position'),
-            'gripper_trigger_threshold': LaunchConfiguration('gripper_trigger_threshold'),
+            'gripper_linear': LaunchConfiguration('gripper_linear'),
+            'gripper_trigger_deadband': LaunchConfiguration('gripper_trigger_deadband'),
             'gripper_initialize': LaunchConfiguration('gripper_initialize'),
             'gripper_initialize_command': LaunchConfiguration('gripper_initialize_command'),
             'gripper_initialize_delay_ms': LaunchConfiguration('gripper_initialize_delay_ms'),
@@ -92,6 +99,7 @@ def generate_launch_description():
             'gripper_tio_voltage': LaunchConfiguration('gripper_tio_voltage'),
             'gripper_use_button': LaunchConfiguration('gripper_use_button'),
             'gripper_button_index': LaunchConfiguration('gripper_button_index'),
+            'debug': LaunchConfiguration('debug'),
         }.items(),
     )
 
@@ -105,7 +113,8 @@ def generate_launch_description():
         gripper_slave_id_arg,
         gripper_open_position_arg,
         gripper_closed_position_arg,
-        gripper_trigger_threshold_arg,
+        gripper_linear_arg,
+        gripper_trigger_deadband_arg,
         gripper_initialize_arg,
         gripper_initialize_command_arg,
         gripper_initialize_delay_arg,
@@ -114,6 +123,7 @@ def generate_launch_description():
         gripper_tio_voltage_arg,
         gripper_use_button_arg,
         gripper_button_index_arg,
+        debug_arg,
         quest_reader_launch,
         rc_ctrl_launch,
     ])

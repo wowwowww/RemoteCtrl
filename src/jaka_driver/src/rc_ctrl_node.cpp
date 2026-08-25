@@ -51,6 +51,7 @@ struct CtrlPose {
 // Teleop state: whether the grip is currently held, the controller pose captured
 // at the press instant, and the latest controller pose.
 bool gripped = false;
+bool debug = false;
 CtrlPose ctrl_origin;   // controller pose at grip press (origin)
 CtrlPose ctrl_prev;     // last controller pose we commanded
 geometry_msgs::msg::PoseStamped::SharedPtr latest;
@@ -62,7 +63,9 @@ int grip_axis = 0;           // index into Joy.axes: 0 = leftGrip, 1 = rightGrip
 int gripper_axis = 2;        // index trigger: 2 = leftTrig, 3 = rightTrig
 bool gripper_use_button = false;
 int gripper_button_index = 0;
-double gripper_trigger_threshold = 0.5;
+bool gripper_linear = true; // true = linear (analog axes), false = digital (button)
+double gripper_trigger_deadband = 0.02; // minimal change to send new Grip()
+double prev_gripper_trigger = 0.0;
 std::unique_ptr<pgi140::Pgi140Gripper> gripper;
 
 // Quaternion is (s, x, y, z) with s the scalar, matching ROS (w, x, y, z).
@@ -271,6 +274,12 @@ void target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         servo_hold(robot);
     }
+    if(debug)
+    {
+        RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] target_callback: %f,%f,%f",
+                    arm_name.c_str(), msg->pose.position.x,msg->pose.position.y,msg->pose.position.z);
+    }
 }
 
 void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -283,40 +292,54 @@ void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
 
     if (gripper != nullptr)
     {
-        bool pressed = false;
-        if (gripper_use_button)
+        // Two gripper control modes:
+        // - "digital": binary control via a Joy button -> set_closed(bool)
+        // - "linear" : analog control via a Joy axis -> Grip(float)
+        if (!gripper_linear)
         {
-            pressed = msg->buttons.size() > static_cast<size_t>(gripper_button_index) &&
-                      msg->buttons[gripper_button_index] != 0;
-        }
-        else
-        {
-            float trigger = msg->axes.size() > static_cast<size_t>(gripper_axis)
-                              ? msg->axes[gripper_axis] : 0.0f;
-            pressed = trigger >= static_cast<float>(gripper_trigger_threshold);
-            // The Quest APK normally supplies the analog value, but some
-            // controller firmware reports only the digital LTr/RTr state.
-            // Accept either representation unless an alternate button-only
-            // mode was explicitly requested.
-            if (!pressed && msg->buttons.size() > static_cast<size_t>(gripper_button_index)) {
-                pressed = msg->buttons[gripper_button_index] != 0;
+            bool pressed = msg->buttons.size() > static_cast<size_t>(gripper_button_index) &&
+                           msg->buttons[gripper_button_index] != 0;
+            if (pressed != gripper->closed())
+            {
+                std::string error;
+                if (!gripper->set_closed(pressed, &error))
+                {
+                    RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                                "[%s] PGI gripper command failed: %s",
+                                arm_name.c_str(), error.c_str());
+                }
+                else
+                {
+                    RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                                "[%s] PGI gripper %s",
+                                arm_name.c_str(), pressed ? "closed" : "opened");
+                }
             }
         }
-
-        if (pressed != gripper->closed())
+        else // linear (analog) control
         {
-            std::string error;
-            if (!gripper->set_closed(pressed, &error))
+            float trigger_raw = msg->axes.size() > static_cast<size_t>(gripper_axis)
+                                  ? msg->axes[gripper_axis] : 0.0f;
+            // Normalize/clamp to [0,1]. Many controllers already report 0..1.
+            float trigger = trigger_raw;
+            if (trigger < 0.0f) trigger = 0.0f;
+            if (trigger > 1.0f) trigger = 1.0f;
+            if (std::fabs(trigger - prev_gripper_trigger) >= gripper_trigger_deadband||trigger>0.95)
             {
-                RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                            "[%s] PGI gripper command failed: %s",
-                            arm_name.c_str(), error.c_str());
-            }
-            else
-            {
-                RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
-                            "[%s] PGI gripper %s",
-                            arm_name.c_str(), pressed ? "closed" : "opened");
+                std::string error;
+                if (!gripper->Grip(trigger, &error))
+                {
+                    RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                                "[%s] PGI gripper Grip(%.3f) failed: %s",
+                                arm_name.c_str(), trigger, error.c_str());
+                }
+                else
+                {
+                    RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                                "[%s] PGI gripper Grip(%.3f)",
+                                arm_name.c_str(), trigger);
+                }
+                prev_gripper_trigger = trigger;
             }
         }
     }
@@ -359,12 +382,13 @@ bool bring_up_arm(JAKAZuRobot &robot, const std::string &ip, const char *arm)
             const auto & config = gripper->config();
             RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
                         "[%s] PGI-140-80 ready: RS485 channel=%d slave=%d force=%d%% speed=%d%% "
-                        "open=%d closed=%d trigger axis=%d%s button=%d",
+                        "open=%d closed=%d trigger_axis=%d mode=%s button=%d deadband=%.3f",
                         arm_name.c_str(), config.rs485_channel, config.slave_id,
                         config.force_percent, config.speed_percent,
                         config.open_position, config.closed_position,
-                        gripper_axis, gripper_use_button ? " (digital button)" : "",
-                        gripper_use_button ? gripper_button_index : -1);
+                        gripper_axis, (gripper_linear ? "linear" : "digital"),
+                        (gripper_linear ? -1 : gripper_button_index),
+                        gripper_trigger_deadband);
         }
     }
 
@@ -395,8 +419,19 @@ bool bring_up_arm(JAKAZuRobot &robot, const std::string &ip, const char *arm)
     // Hard Cartesian velocity/acceleration/jerk limits for servo_p (mm/s,
     // mm/s^2, mm/s^3) plus orientation limits (deg/s, deg/s^2, deg/s^3):
     // a safety bound on top of the per-cycle software clamp.
-    robot.servo_move_use_carte_NLF(200.0, 2000.0, 20000.0,
-                                   90.0, 900.0, 9000.0);
+
+    //滤波设置
+    //非线性滤波
+    ret = robot.servo_move_use_carte_NLF(1500.0, 2500.0, 2800.0,1120.0, 1180.0, 1720.0);
+    //速度前瞻滤波
+    //ret = robot.servo_speed_foresight(10, 0.5);
+    if(ret != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"), "%s servo_speed_foresight FAILED (ret=%d: %s)",
+                    arm, ret, mapErr.count(ret) ? mapErr[ret].c_str() : "unknown");
+        return false;
+    }
+
 
     ret = robot.servo_move_enable(true);
     if (ret != 0)
@@ -443,26 +478,26 @@ int main(int argc, char *argv[])
     // Joy.buttons follows quest_reader's stable order; LTr=10 and RTr=11.
     gripper_button_index = configured_button_index >= 0 ? configured_button_index :
         (is_right ? 11 : 10);
-    gripper_trigger_threshold = node->declare_parameter<double>(
-        "gripper_trigger_threshold", 0.5);
-    if (!std::isfinite(gripper_trigger_threshold) ||
-        gripper_trigger_threshold < 0.0 || gripper_trigger_threshold > 1.0)
-    {
+    gripper_linear = node->declare_parameter<bool>("gripper_linear", true);
+    gripper_trigger_deadband = node->declare_parameter<double>("gripper_trigger_deadband", 0.02);
+    // Backwards compatibility: if the old boolean is set, prefer digital mode.
+    if (gripper_use_button) {
         RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                    "[%s] invalid gripper_trigger_threshold; using 0.5",
+                    "[%s] parameter gripper_use_button is present; using digital mode",
                     arm_name.c_str());
-        gripper_trigger_threshold = 0.5;
+        gripper_linear = false;
     }
+    // gripper_trigger_threshold removed; using deadband for linear control
 
     pgi140::GripperConfig gripper_config;
     gripper_config.rs485_channel = node->declare_parameter<int>("gripper_rs485_channel", 1);
     gripper_config.slave_id = node->declare_parameter<int>("gripper_slave_id", 1);
     gripper_config.baudrate = node->declare_parameter<int>("gripper_baudrate", 115200);
-    gripper_config.force_percent = node->declare_parameter<int>("gripper_force", 50);
-    gripper_config.speed_percent = node->declare_parameter<int>("gripper_speed", 50);
-    gripper_config.open_position = node->declare_parameter<int>("gripper_open_position", 0);
+    gripper_config.force_percent = node->declare_parameter<int>("gripper_force", 20);
+    gripper_config.speed_percent = node->declare_parameter<int>("gripper_speed", 100);
+    gripper_config.open_position = node->declare_parameter<int>("gripper_open_position", 1000);
     gripper_config.closed_position = node->declare_parameter<int>(
-        "gripper_closed_position", 1000);
+        "gripper_closed_position", 0);
     gripper_config.initialize = node->declare_parameter<bool>("gripper_initialize", true);
     gripper_config.initialize_command = node->declare_parameter<int>(
         "gripper_initialize_command", 0x01);
@@ -474,6 +509,10 @@ int main(int argc, char *argv[])
         "gripper_enable_tio_power", true);
     gripper_config.tio_voltage = node->declare_parameter<int>(
         "gripper_tio_voltage", 0);
+
+    
+   debug = node->declare_parameter<bool>("debug", false);
+
 
     gripper = std::make_unique<pgi140::Pgi140Gripper>(robot, gripper_config);
     arm_ok = bring_up_arm(robot, ip, arm_name.c_str());

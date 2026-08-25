@@ -29,9 +29,6 @@ find_package(rosidl_default_generators REQUIRED)
 
 # Declare executable targets
 add_executable(jaka_driver src/jaka_driver.cpp)
-add_executable(sdk_test src/sdk_test.cpp)
-add_executable(client src/client.cpp)
-add_executable(servoj_demo src/servoj_demo.cpp)
 add_executable(rc_ctrl_node
   src/rc_ctrl_node.cpp
   src/pgi140_gripper.cpp
@@ -49,31 +46,8 @@ ament_target_dependencies(jaka_driver
   action_msgs
   control_msgs
 )
-ament_target_dependencies(sdk_test
-  rclcpp
-  std_msgs
-  geometry_msgs
-  sensor_msgs
-  jaka_msgs
-  action_msgs
-)
-ament_target_dependencies(client
-  rclcpp
-  std_msgs
-  geometry_msgs
-  sensor_msgs
-  jaka_msgs
-  action_msgs
-  control_msgs
-)
-ament_target_dependencies(servoj_demo
-  rclcpp
-  std_msgs
-  geometry_msgs
-  sensor_msgs
-  jaka_msgs
-  action_msgs
-)
+
+
 ament_target_dependencies(rc_ctrl_node
   rclcpp
   std_msgs
@@ -90,26 +64,7 @@ target_include_directories(jaka_driver
     ${ament_INCLUDE_DIRS}
 )
 
-target_include_directories(client
-  PUBLIC
-    include
-  PRIVATE
-    ${ament_INCLUDE_DIRS}
-)
 
-target_include_directories(sdk_test
-  PUBLIC
-    include
-  PRIVATE
-    ${ament_INCLUDE_DIRS}
-)
-
-target_include_directories(servoj_demo
-  PUBLIC
-    include
-  PRIVATE
-    ${ament_INCLUDE_DIRS}
-)
 
 target_include_directories(rc_ctrl_node
   PUBLIC
@@ -128,17 +83,11 @@ link_directories(${LIBRARY_DIR})
 
 # Find the library and link it properly
 target_link_libraries(jaka_driver ${LIBRARY_DIR}/libjakaAPI.so)
-target_link_libraries(sdk_test ${LIBRARY_DIR}/libjakaAPI.so)
-target_link_libraries(client ${LIBRARY_DIR}/libjakaAPI.so)
-target_link_libraries(servoj_demo ${LIBRARY_DIR}/libjakaAPI.so)
 target_link_libraries(rc_ctrl_node ${LIBRARY_DIR}/libjakaAPI.so)
 
 # Install executables
 install(TARGETS
   jaka_driver
-  sdk_test
-  client
-  servoj_demo
   rc_ctrl_node
   DESTINATION lib/${PROJECT_NAME}
 )

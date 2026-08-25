@@ -38,10 +38,10 @@ def generate_launch_description():
         description='Topic carrying the VR button/grip state (sensor_msgs/Joy)'
     )
     gripper_force_arg = DeclareLaunchArgument(
-        'gripper_force', default_value='50',
+        'gripper_force', default_value='20',
         description='PGI force percentage (20..100)')
     gripper_speed_arg = DeclareLaunchArgument(
-        'gripper_speed', default_value='50',
+        'gripper_speed', default_value='100',
         description='PGI speed percentage (1..100)')
     gripper_baudrate_arg = DeclareLaunchArgument(
         'gripper_baudrate', default_value='115200',
@@ -53,14 +53,17 @@ def generate_launch_description():
         'gripper_slave_id', default_value='1',
         description='PGI Modbus slave ID')
     gripper_open_position_arg = DeclareLaunchArgument(
-        'gripper_open_position', default_value='0',
+        'gripper_open_position', default_value='1000',
         description='PGI open target in per mille (0..1000)')
     gripper_closed_position_arg = DeclareLaunchArgument(
-        'gripper_closed_position', default_value='1000',
+        'gripper_closed_position', default_value='0',
         description='PGI closed target in per mille (0..1000)')
-    gripper_trigger_threshold_arg = DeclareLaunchArgument(
-        'gripper_trigger_threshold', default_value='0.5',
-        description='Quest index-trigger threshold (0..1)')
+    gripper_linear_arg = DeclareLaunchArgument(
+        'gripper_linear', default_value='true',
+        description='Use linear (analog axes) control for gripper by default')
+    gripper_trigger_deadband_arg = DeclareLaunchArgument(
+        'gripper_trigger_deadband', default_value='0.02',
+        description='Minimal change in analog trigger to send a new Grip()')
     gripper_initialize_arg = DeclareLaunchArgument(
         'gripper_initialize', default_value='true',
         description='Initialize PGI gripper during node startup')
@@ -110,7 +113,8 @@ def generate_launch_description():
             'gripper_slave_id': ParameterValue(LaunchConfiguration('gripper_slave_id'), value_type=int),
             'gripper_open_position': ParameterValue(LaunchConfiguration('gripper_open_position'), value_type=int),
             'gripper_closed_position': ParameterValue(LaunchConfiguration('gripper_closed_position'), value_type=int),
-            'gripper_trigger_threshold': ParameterValue(LaunchConfiguration('gripper_trigger_threshold'), value_type=float),
+            'gripper_linear': ParameterValue(LaunchConfiguration('gripper_linear'), value_type=bool),
+            'gripper_trigger_deadband': ParameterValue(LaunchConfiguration('gripper_trigger_deadband'), value_type=float),
             'gripper_initialize': ParameterValue(LaunchConfiguration('gripper_initialize'), value_type=bool),
             'gripper_initialize_command': ParameterValue(LaunchConfiguration('gripper_initialize_command'), value_type=int),
             'gripper_initialize_delay_ms': ParameterValue(LaunchConfiguration('gripper_initialize_delay_ms'), value_type=int),
@@ -141,7 +145,8 @@ def generate_launch_description():
             'gripper_slave_id': ParameterValue(LaunchConfiguration('gripper_slave_id'), value_type=int),
             'gripper_open_position': ParameterValue(LaunchConfiguration('gripper_open_position'), value_type=int),
             'gripper_closed_position': ParameterValue(LaunchConfiguration('gripper_closed_position'), value_type=int),
-            'gripper_trigger_threshold': ParameterValue(LaunchConfiguration('gripper_trigger_threshold'), value_type=float),
+            'gripper_linear': ParameterValue(LaunchConfiguration('gripper_linear'), value_type=bool),
+            'gripper_trigger_deadband': ParameterValue(LaunchConfiguration('gripper_trigger_deadband'), value_type=float),
             'gripper_initialize': ParameterValue(LaunchConfiguration('gripper_initialize'), value_type=bool),
             'gripper_initialize_command': ParameterValue(LaunchConfiguration('gripper_initialize_command'), value_type=int),
             'gripper_initialize_delay_ms': ParameterValue(LaunchConfiguration('gripper_initialize_delay_ms'), value_type=int),
@@ -167,7 +172,8 @@ def generate_launch_description():
         gripper_slave_id_arg,
         gripper_open_position_arg,
         gripper_closed_position_arg,
-        gripper_trigger_threshold_arg,
+        gripper_linear_arg,
+        gripper_trigger_deadband_arg,
         gripper_initialize_arg,
         gripper_initialize_command_arg,
         gripper_initialize_delay_arg,

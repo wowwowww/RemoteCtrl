@@ -18,7 +18,7 @@ struct GripperConfig
   int stopbit = 1;
   int parity = 78;             // JAKA SDK: 78 means no parity
   int force_percent = 50;      // PGI range: 20..100
-  int speed_percent = 50;      // PGI range: 1..100
+  int speed_percent = 100;      // PGI range: 1..100
   int open_position = 0;       // PGI range: 0..1000 per mille
   int closed_position = 1000;  // PGI range: 0..1000 per mille
   bool initialize = true;
@@ -42,6 +42,7 @@ public:
   bool set_force(int force_percent, std::string * error = nullptr);
   bool set_speed(int speed_percent, std::string * error = nullptr);
   bool set_closed(bool closed, std::string * error = nullptr);
+  bool Grip(float grip, std::string * error = nullptr);
 
   bool closed() const { return closed_; }
   const GripperConfig & config() const { return config_; }
