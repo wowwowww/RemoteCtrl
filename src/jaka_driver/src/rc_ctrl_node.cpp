@@ -232,9 +232,102 @@ void servo_hold(JAKAZuRobot &robot)
                     "[%s] servo_p HOLD failed: %s", arm_name.c_str(), mapErr[ret].c_str());
     }
 }
+
+// Re-arm the robot if protection dropped it out of servo. Called on every grip
+// press so a re-grip recovers from a protective/collision stop. Checks the
+// states top-down (servo -> enable -> power-on) and drives them bottom-up
+// (power_on -> enable_robot -> servo_move_enable(true)), only performing the
+// steps actually needed:
+//   - already in servo -> nothing to do;
+//   - collision / error  -> collision_recover() + clear_error();
+//   - powered off        -> power_on (+8 s settle);
+//   - disabled           -> enable_robot (+4 s settle);
+//   - otherwise          -> just re-enter servo.
+// Mirrors bring_up_arm(), but skips login and the steps that are still intact.
+bool ensure_arm_ready(JAKAZuRobot &robot)
+{
+    if (!arm_ok)
+        return false;
+
+    // Fast path: still in servo, nothing to recover.
+    BOOL in_servo = FALSE;
+    if (robot.is_in_servomove(&in_servo) == 0 && in_servo)
+        return true;
+
+    // Clear a protective stop / collision / motion-abnormal error first, so the
+    // controller will accept power_on/enable/servo again.
+    BOOL in_collision = FALSE;
+    if (robot.is_in_collision(&in_collision) == 0 && in_collision)
+    {
+        int r = robot.collision_recover();
+        RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] collision_recover ret=%d", arm_name.c_str(), r);
+    }
+    int r = robot.clear_error();
+    RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                "[%s] clear_error ret=%d", arm_name.c_str(), r);
+
+    // Read power-on / enabled flags. get_robot_status_simple is the lightweight
+    // source for both (errcode / powered_on / enabled).
+    RobotStatus_simple status{};
+    if (robot.get_robot_status_simple(&status) != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] get_robot_status_simple failed; cannot re-arm", arm_name.c_str());
+        return false;
+    }
+
+    if (status.powered_on == 0)
+    {
+        int ret = robot.power_on();
+        if (ret != 0)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] re-arm power_on FAILED (ret=%d: %s)", arm_name.c_str(),
+                        ret, mapErr.count(ret) ? mapErr[ret].c_str() : "unknown");
+            return false;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"), "[%s] re-arm power_on OK", arm_name.c_str());
+        std::this_thread::sleep_for(std::chrono::seconds(8));
+        // Power-on leaves the robot disabled; refresh the flags before deciding
+        // whether enable_robot is still needed.
+        if (robot.get_robot_status_simple(&status) != 0)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] get_robot_status_simple failed after power_on", arm_name.c_str());
+            return false;
+        }
+    }
+
+    if (status.enabled == 0)
+    {
+        int ret = robot.enable_robot();
+        if (ret != 0)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] re-arm enable_robot FAILED (ret=%d: %s)", arm_name.c_str(),
+                        ret, mapErr.count(ret) ? mapErr[ret].c_str() : "unknown");
+            return false;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"), "[%s] re-arm enable_robot OK", arm_name.c_str());
+        std::this_thread::sleep_for(std::chrono::seconds(4));
+    }
+
+    int ret = robot.servo_move_enable(true);
+    if (ret != 0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] re-arm servo_move_enable FAILED (ret=%d: %s)", arm_name.c_str(),
+                    ret, mapErr.count(ret) ? mapErr[ret].c_str() : "unknown");
+        return false;
+    }
+    RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"), "[%s] re-arm servo enabled", arm_name.c_str());
+    return true;
+}
+
 // Update the grip state for one arm. On the rising edge (grip crosses 0.5) we
-// capture the controller pose and the arm's current TCP as the two origins; on
-// release we stop commanding so the arm holds its last position.
+// re-arm the robot if protection dropped it, capture the controller pose as the
+// origin, and begin tracking; on release we stop commanding so the arm holds.
 void handle_grip(bool &gripped, float value,
                  const geometry_msgs::msg::PoseStamped::SharedPtr &latest,
                  CtrlPose &ctrl_origin,
@@ -244,6 +337,10 @@ void handle_grip(bool &gripped, float value,
     bool now = value > 0.5f;
     if (now && !gripped)
     {
+        // Re-arm before capturing the origin so the arm is actually in servo
+        // when we start sending servo_p deltas.
+        ensure_arm_ready(robot);
+
         if (latest)
         {
             pose_to_ctrl(latest, ctrl_origin);
