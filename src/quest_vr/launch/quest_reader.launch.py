@@ -42,6 +42,18 @@ def generate_launch_description():
     smooth_alpha_arg = DeclareLaunchArgument(
         'smooth_alpha', default_value='0.4',
         description='位姿一阶低通滤波系数（0~1，越大越跟手，0 表示不过滤）')
+    use_wifi_arg = DeclareLaunchArgument(
+        'use_wifi', default_value='true',
+        description='是否自动通过 tcpip+connect 建立无线 adb 连接（失败回退有线）')
+    vr_ip_arg = DeclareLaunchArgument(
+        'vr_ip', default_value='192.168.1.104',
+        description='Quest 眼镜的无线 IP')
+    vr_port_arg = DeclareLaunchArgument(
+        'vr_port', default_value='5555',
+        description='眼镜 adb 无线监听端口')
+    vr_serial_arg = DeclareLaunchArgument(
+        'vr_serial', default_value='2G97C5ZH5Q0279',
+        description='多设备时指定目标 adb 序列号（adb devices 查看）')
 
     quest_reader_node = Node(
         package='quest_vr',
@@ -61,6 +73,10 @@ def generate_launch_description():
             'right_target_topic': LaunchConfiguration('right_target_topic'),
             'publish_rate': ParameterValue(LaunchConfiguration('publish_rate'), value_type=float),
             'smooth_alpha': ParameterValue(LaunchConfiguration('smooth_alpha'), value_type=float),
+            'use_wifi': ParameterValue(LaunchConfiguration('use_wifi'), value_type=bool),
+            'vr_ip': LaunchConfiguration('vr_ip'),
+            'vr_port': ParameterValue(LaunchConfiguration('vr_port'), value_type=int),
+            'vr_serial': LaunchConfiguration('vr_serial'),
             # 静态 TF：眼镜原点在机器人基坐标系下的位姿（标定后填）
             'tf_translation': [0.0, 0.0, 0.0],
             'tf_rotation': [1.0, 0.0, 0.0, 0.0],
@@ -80,5 +96,9 @@ def generate_launch_description():
         right_topic_arg,
         rate_arg,
         smooth_alpha_arg,
+        use_wifi_arg,
+        vr_ip_arg,
+        vr_port_arg,
+        vr_serial_arg,
         quest_reader_node,
     ])

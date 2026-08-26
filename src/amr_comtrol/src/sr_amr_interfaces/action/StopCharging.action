@@ -1,0 +1,4 @@
+---
+bool result                            # true if the action is successful
+string error_code                      # error code if the action failed
+---

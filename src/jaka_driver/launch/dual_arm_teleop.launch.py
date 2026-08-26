@@ -66,6 +66,18 @@ def generate_launch_description():
     debug_arg = DeclareLaunchArgument(
         'debug', default_value='false',
         description='Enable debug logging for rc_ctrl_node')
+    use_wifi_arg = DeclareLaunchArgument(
+        'use_wifi', default_value='true',
+        description='Whether quest_reader auto-switches to wireless adb (falls back to USB)')
+    vr_ip_arg = DeclareLaunchArgument(
+        'vr_ip', default_value='192.168.1.104',
+        description='Quest wireless IP address')
+    vr_port_arg = DeclareLaunchArgument(
+        'vr_port', default_value='5555',
+        description='Quest adb wireless listen port')
+    vr_serial_arg = DeclareLaunchArgument(
+        'vr_serial', default_value='2G97C5ZH5Q0279',
+        description='Quest adb serial (for multi-device)')
 
     # quest_reader publishes /rc_ctrl/button + /rc_ctrl/{left,right}_target from
     # the VR handles; rc_ctrl_node connects to the arms and servos on those topics.
@@ -73,7 +85,13 @@ def generate_launch_description():
     quest_reader_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([FindPackageShare('quest_vr'), 'launch', 'quest_reader.launch.py'])
-        ])
+        ]),
+        launch_arguments={
+            'use_wifi': LaunchConfiguration('use_wifi'),
+            'vr_ip': LaunchConfiguration('vr_ip'),
+            'vr_port': LaunchConfiguration('vr_port'),
+            'vr_serial': LaunchConfiguration('vr_serial'),
+        }.items(),
     )
     rc_ctrl_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -124,6 +142,10 @@ def generate_launch_description():
         gripper_use_button_arg,
         gripper_button_index_arg,
         debug_arg,
+        use_wifi_arg,
+        vr_ip_arg,
+        vr_port_arg,
+        vr_serial_arg,
         quest_reader_launch,
         rc_ctrl_launch,
     ])

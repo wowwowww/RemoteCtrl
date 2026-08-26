@@ -1,0 +1,8 @@
+geometry_msgs/Pose  initial_pose              # Initial pose (x, y, yaw) for the robot after switching map. The yaw is in radians (ROS convention).   
+bool                force_set_initial_pose    # if true, force set the initial pose without check location confidence. [Warning] Use with caution.
+float64             timeout_sec               # Timeout for the action to complete, in seconds.
+---
+bool    success
+string  message
+---
+string feedback_message

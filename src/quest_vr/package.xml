@@ -3,7 +3,7 @@
 <package format="3">
   <name>quest_vr</name>
   <version>0.0.0</version>
-  <description>Read Quest VR glasses pose (4x4 transform per hand) via adb logcat and publish PoseStamped for dual-arm servo tracking. Requires a USB-connected Quest with adb; set 'command' to use an external subprocess instead.</description>
+  <description>Read Quest VR glasses pose (4x4 transform per hand) via adb logcat and publish PoseStamped for dual-arm servo tracking. Connects via USB adb by default and can auto-switch to wireless adb (use_wifi/vr_ip, falls back to USB on failure); set 'command' to use an external subprocess instead.</description>
   <maintainer email="kevin@todo.todo">kevin</maintainer>
   <license>Apache-2.0</license>
 

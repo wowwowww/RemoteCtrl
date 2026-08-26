@@ -1,0 +1,8 @@
+bool   use_minute_limit           # default false, pairs with charging_minute
+uint32 charging_minute         
+bool   use_percent_limit          # default false, pairs with charging_percent
+uint32 charging_percent
+---
+bool result                       # true if the action is successful
+string error_code                 # error code if the action failed
+---

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sr_amr_control</name>
+  <version>1.1.2</version>
+  <description>StandardRobots AMR control ROS2 package</description>
+  <maintainer email="zhangxiao@standard-robots.com">zhangxiao</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sr_amr_interfaces</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_testing_ros</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

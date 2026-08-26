@@ -13,6 +13,7 @@ import math
 import shlex
 import subprocess
 import threading
+import time
 
 import numpy as np
 
@@ -236,6 +237,11 @@ class QuestReader(Node):
         self.apk_activity = self.declare_parameter(
             'apk_activity', 'com.rail.oculus.teleop/com.rail.oculus.teleop.MainActivity').value
         self.start_apk = self.declare_parameter('start_apk', True).value
+        # 无线 adb 连接参数（use_wifi=true 时自动 tcpip + connect，失败回退有线）
+        self.use_wifi = self.declare_parameter('use_wifi', True).value
+        self.vr_ip = self.declare_parameter('vr_ip', '192.168.1.104').value
+        self.vr_port = self.declare_parameter('vr_port', 5555).value
+        self.vr_serial = self.declare_parameter('vr_serial', '2G97C5ZH5Q0279').value
 
         # 发布者
         self.left_pub = self.create_publisher(PoseStamped, left_topic, 5)
@@ -301,18 +307,131 @@ class QuestReader(Node):
         self.reader_thread = threading.Thread(target=self._subprocess_reader_loop, daemon=True)
         self.reader_thread.start()
 
+    def _list_connected_devices(self):
+        """解析 adb devices，返回在线（state=='device'）设备序列号列表。
+
+        offline / unauthorized / no permissions 条目被过滤掉；adb 不存在或
+        调用异常时返回空列表。
+        """
+        try:
+            out = subprocess.run(['adb', 'devices'], capture_output=True,
+                                 text=True, timeout=10.0)
+        except Exception as e:
+            self.get_logger().error('无法执行 adb devices: %s' % e)
+            return []
+        devices = []
+        for line in out.stdout.splitlines()[1:]:  # 跳过表头 "List of devices attached"
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == 'device':
+                devices.append(parts[0])
+        return devices
+
+    def _setup_adb_connection(self):
+        """建立 adb 连接并返回后续命令前缀。
+
+        use_wifi=true 时优先建立无线连接（tcpip + connect），任一步失败回退
+        有线；use_wifi=false 时保持原有有线行为。返回：
+          ['adb']                      -- 无序列号的普通 adb
+          ['adb', '-s', <serial>]      -- 指定 USB 序列号（有线）
+          ['adb', '-s', '<ip>:<port>'] -- 无线连接
+        """
+        if not self.use_wifi:
+            return ['adb']
+
+        if not self.vr_ip:
+            self.get_logger().warning('use_wifi=true 但未设置 vr_ip，回退有线 adb')
+            return ['adb']
+
+        wireless_serial = '%s:%d' % (self.vr_ip, int(self.vr_port))
+        devices = self._list_connected_devices()
+
+        # 上次运行遗留的无线连接已存在：跳过 tcpip/connect，直接使用
+        if wireless_serial in devices:
+            self.get_logger().info('检测到已存在的无线连接 %s，直接使用' % wireless_serial)
+            return ['adb', '-s', wireless_serial]
+
+        # 从在线设备中挑出 USB 设备（无线条目形如 ip:port，含 ':'）
+        usb_devices = [d for d in devices if ':' not in d]
+        usb_serial = None
+        if self.vr_serial:
+            if self.vr_serial in usb_devices:
+                usb_serial = self.vr_serial
+            else:
+                self.get_logger().error(
+                    'vr_serial=%s 不在 adb devices 中（现有设备: %s），回退有线 adb'
+                    % (self.vr_serial, usb_devices))
+                return ['adb']
+        elif len(usb_devices) == 1:
+            usb_serial = usb_devices[0]
+        elif len(usb_devices) > 1:
+            self.get_logger().error(
+                '检测到多台 adb 设备 %s，请用 vr_serial 参数指定目标序列号，回退有线 adb'
+                % usb_devices)
+            return ['adb']
+        else:
+            self.get_logger().warning('未检测到任何在线 adb 设备，无线连接可能失败')
+
+        wired_prefix = ['adb', '-s', usb_serial] if usb_serial else ['adb']
+
+        # 步骤1：有线设备上开启 tcpip 监听
+        tcpip_cmd = wired_prefix + ['tcpip', str(int(self.vr_port))]
+        try:
+            r = subprocess.run(tcpip_cmd, capture_output=True, text=True, timeout=10.0)
+            tcpip_ok = r.returncode == 0
+        except Exception as e:
+            tcpip_ok = False
+            r = None
+            self.get_logger().warning('adb tcpip 执行异常: %s' % e)
+        if not tcpip_ok:
+            output = ''
+            if r is not None:
+                output = (r.stdout + r.stderr).strip()
+            self.get_logger().warning('adb tcpip 失败（输出: %s），回退有线 adb' % output)
+            return wired_prefix
+
+        # tcpip 后 adbd 重启，USB 设备会短暂掉线，稍等片刻
+        time.sleep(1.0)
+
+        # 步骤2：无线连接
+        try:
+            r = subprocess.run(['adb', 'connect', wireless_serial],
+                               capture_output=True, text=True, timeout=10.0)
+        except Exception as e:
+            self.get_logger().warning('adb connect 执行异常: %s，回退有线 adb' % e)
+            return wired_prefix
+
+        # 步骤3：验证连接（重试最多 5 次，每次间隔 1s）
+        connected = False
+        for _ in range(5):
+            time.sleep(1.0)
+            if wireless_serial in self._list_connected_devices():
+                connected = True
+                break
+        if not connected:
+            self.get_logger().warning(
+                '无线连接验证失败（connect 输出: %s），回退有线 adb'
+                % (r.stdout + r.stderr).strip())
+            return wired_prefix
+
+        self.get_logger().info('已成功无线连接 %s，可拔掉USB线' % wireless_serial)
+        return ['adb', '-s', wireless_serial]
+
     def _start_adb_reader(self):
+        # 建立连接（无线优先，失败自动回退有线），得到后续 adb 命令的前缀
+        self.adb_prefix = self._setup_adb_connection() or ['adb']
+        self.get_logger().info('adb 目标前缀: %s' % ' '.join(self.adb_prefix))
         if self.start_apk:
             shell_cmd = ('am start -n "%s" -a android.intent.action.MAIN '
                          '-c android.intent.category.LAUNCHER' % self.apk_activity)
             try:
-                subprocess.run(['adb', 'shell', shell_cmd], capture_output=True, timeout=10.0)
+                subprocess.run(self.adb_prefix + ['shell', shell_cmd],
+                               capture_output=True, timeout=10.0)
                 self.get_logger().info('已启动 APK: %s' % self.apk_activity)
             except Exception as e:
                 self.get_logger().warning('启动 APK 失败: %s' % e)
         try:
             self.proc = subprocess.Popen(
-                ['adb', 'logcat', '-T', '0'], stdout=subprocess.PIPE,
+                self.adb_prefix + ['logcat', '-T', '0'], stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1)
         except Exception as e:
             self.get_logger().error('无法启动 adb logcat: %s' % e)

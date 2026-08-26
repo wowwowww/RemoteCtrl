@@ -1,0 +1,9 @@
+# You can navigate AMR to a station by specifying the station ID of current localized map.
+uint64 station_id         # the ID of the station to move to, must be valid in the current map and AMR has to be localized
+---
+bool result               # true if the action is successful
+string error_code         # error code if the action failed
+---
+uint32 cur_path_no        # the current path of planed paths, starts from 0. Both rotational and linear movements count as a path. 
+bool obstacle_paused      # true if the robot is paused due to obstacle detection
+bool manual_paused        # true if the robot is paused due to manually paused

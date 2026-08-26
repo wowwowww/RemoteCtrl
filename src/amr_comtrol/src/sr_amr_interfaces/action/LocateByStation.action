@@ -1,0 +1,8 @@
+uint64  station_id       # Station ID for the robot to relocate   
+bool    force_locate     # if true, force set the initial pose without check location confidence. [Warning] Use with caution.
+float64 timeout_sec      # Timeout for the action to complete, in seconds.
+---
+bool    success
+string  message
+---
+string feedback_message

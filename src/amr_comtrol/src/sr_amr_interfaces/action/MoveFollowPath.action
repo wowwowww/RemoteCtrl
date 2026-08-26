@@ -1,0 +1,8 @@
+# You can navigate AMR by passing multiple path.
+sr_amr_interfaces/Path[] paths         # array of paths to follow, see sr_amr_interfaces/msg/Path.msg for details
+---
+bool result                            # true if the action is successful
+string error_code                      # error code if the action failed
+---
+uint32 cur_path_no                     # the current path of given paths, starts from 0 
+bool obstacle_paused                   # true if the robot is paused due to obstacle detection
