@@ -2,7 +2,11 @@
 
 源码放置于/RemoteCtrl/src文件夹
 遥操作主要使用/jaka_driver、/quest_vr两个文件夹
-sdk_lib_version--2.2.2
+sdk_lib_version:2.2.2
+robot_left_ip:192.168.71.37
+robot_right_ip:192.168.71.36
+amr_connect_ip:192.168.71.50
+
 
 #头显无线连接（自动）
 启动时自动连接无线 adb（use_wifi 默认 true）：

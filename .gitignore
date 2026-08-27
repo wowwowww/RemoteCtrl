@@ -22,3 +22,6 @@ __pycache__/
 # 系统文件
 .DS_Store
 *.swp
+
+#python环境
+.venv/

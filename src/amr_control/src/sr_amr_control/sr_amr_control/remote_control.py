@@ -7,6 +7,7 @@ from rclpy.node import Node
 from sros_sdk_py import SrpClient
 from sros_sdk_py.main_pb2 import SystemState
 from sros_sdk_py.srp import RequestFailedError
+from sensor_msgs.msg import Joy
 from std_srvs.srv import SetBool
 
 from .utils.ros_bridge import ros_to_srp_unit
@@ -60,6 +61,17 @@ class RemoteController:
     self._srp_client = srp_client
     self._state_checker = RemoteControlStateChecker(srp_client)
 
+    self._button_topic = node.declare_parameter(
+      'button_topic', '/rc_ctrl/button'
+    ).value
+    self._joy_deadzone = float(node.declare_parameter('joy_deadzone', 0.2).value)
+    self._max_linear_speed = float(
+      node.declare_parameter('joy_max_linear_speed', 0.5).value
+    )
+    self._max_angular_speed = float(
+      node.declare_parameter('joy_max_angular_speed', 0.8).value
+    )
+
     self._remote_control_enabled_srv = node.create_service(
       SetBool,
       'remote_control_enabled',
@@ -81,6 +93,42 @@ class RemoteController:
       10,
       callback_group=self._topic_group,
     )
+
+    self._button_subscriber = node.create_subscription(
+      Joy,
+      self._button_topic,
+      self._handle_button,
+      10,
+      callback_group=self._topic_group,
+    )
+
+  def _joy_to_twist(self, msg: Joy) -> Twist:
+    twist = Twist()
+    if len(msg.axes) < 6:
+      return twist
+
+    left_js_x = float(msg.axes[4])
+    left_js_y = float(msg.axes[5])
+    dominant = max(abs(left_js_x), abs(left_js_y))
+    if dominant <= self._joy_deadzone:
+      return twist
+
+    span = max(1e-6, 1.0 - self._joy_deadzone)
+    scale = min(1.0, max(0.0, (dominant - self._joy_deadzone) / span))
+
+    if abs(left_js_y) >= abs(left_js_x):
+      twist.linear.x = scale * self._max_linear_speed * (
+        1.0 if left_js_y >= 0.0 else -1.0
+      )
+    else:
+      twist.angular.z = scale * self._max_angular_speed * (
+        -1.0 if left_js_x >= 0.0 else 1.0
+      )
+
+    return twist
+
+  def _handle_button(self, msg: Joy):
+    self._handle_cmd_vel(self._joy_to_twist(msg))
 
   def _handle_remote_control_enabled(
     self, request: SetBool.Request, response: SetBool.Response
@@ -161,9 +209,9 @@ class RemoteController:
     angular_z = msg.angular.z  # rad/s
     try:
       self._srp_client.set_remote_control_speed(
-        int(ros_to_srp_unit(linear_x)),
-        int(ros_to_srp_unit(linear_y)),
-        int(ros_to_srp_unit(angular_z)),
+        int(round(ros_to_srp_unit(linear_x))),
+        int(round(ros_to_srp_unit(linear_y))),
+        int(round(ros_to_srp_unit(angular_z))),
       )
     except RequestFailedError as e:
       self._node.get_logger().error(

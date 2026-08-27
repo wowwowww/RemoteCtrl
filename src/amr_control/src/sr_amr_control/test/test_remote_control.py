@@ -11,6 +11,12 @@ class Twist:
     self.angular = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
 
 
+class Joy:
+  def __init__(self, axes=None):
+    self.axes = list(axes or [])
+    self.buttons = []
+
+
 class SetBool:
   class Request:
     def __init__(self, data=False):
@@ -32,6 +38,10 @@ def _install_ros_stubs():
   geometry_msgs = types.ModuleType('geometry_msgs')
   geometry_msgs_msg = types.ModuleType('geometry_msgs.msg')
   geometry_msgs_msg.Twist = Twist
+
+  sensor_msgs = types.ModuleType('sensor_msgs')
+  sensor_msgs_msg = types.ModuleType('sensor_msgs.msg')
+  sensor_msgs_msg.Joy = Joy
 
   rclpy = types.ModuleType('rclpy')
   callback_groups = types.ModuleType('rclpy.callback_groups')
@@ -64,6 +74,8 @@ def _install_ros_stubs():
   return {
     'geometry_msgs': geometry_msgs,
     'geometry_msgs.msg': geometry_msgs_msg,
+    'sensor_msgs': sensor_msgs,
+    'sensor_msgs.msg': sensor_msgs_msg,
     'rclpy': rclpy,
     'rclpy.callback_groups': callback_groups,
     'rclpy.node': node_module,
@@ -127,12 +139,17 @@ class FakeLogger:
 class FakeNode:
   def __init__(self):
     self.logger = FakeLogger()
+    self.parameters = {}
 
   def create_service(self, *args, **kwargs):
     return (args, kwargs)
 
   def create_subscription(self, *args, **kwargs):
     return (args, kwargs)
+
+  def declare_parameter(self, name, default_value=None, descriptor=None):
+    value = self.parameters.get(name, default_value)
+    return types.SimpleNamespace(value=value)
 
   def get_logger(self):
     return self.logger
@@ -170,6 +187,11 @@ def make_cmd_vel(linear_x=0.5, linear_y=-0.25, angular_z=0.1):
   msg.linear.y = linear_y
   msg.angular.z = angular_z
   return msg
+
+
+def make_joy(left_x=0.0, left_y=0.0):
+  axes = [0.0, 0.0, 0.0, 0.0, left_x, left_y, 0.0, 0.0]
+  return Joy(axes=axes)
 
 
 class TestRemoteController(unittest.TestCase):
@@ -226,6 +248,76 @@ class TestRemoteController(unittest.TestCase):
     self.assertEqual(srp_client.remote_control_requests, [True])
     self.assertEqual(srp_client.oba_requests, [True])
     self.assertEqual(srp_client.speed_requests, [])
+
+  def test_joy_centered_maps_to_stop(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy())
+
+    self.assertEqual(srp_client.speed_requests, [(0, 0, 0)])
+
+  def test_joy_forward_is_linear(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_y=1.0))
+
+    self.assertEqual(srp_client.speed_requests, [(500, 0, 0)])
+
+  def test_joy_backward_is_linear(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_y=-1.0))
+
+    self.assertEqual(srp_client.speed_requests, [(-500, 0, 0)])
+
+  def test_joy_left_is_angular(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_x=-1.0))
+
+    self.assertEqual(srp_client.speed_requests, [(0, 0, 800)])
+
+  def test_joy_right_is_angular(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_x=1.0))
+
+    self.assertEqual(srp_client.speed_requests, [(0, 0, -800)])
+
+  def test_joy_deadzone_blocks_motion(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_x=0.1, left_y=0.0))
+
+    self.assertEqual(srp_client.speed_requests, [(0, 0, 0)])
+
+  def test_joy_uses_dominant_axis(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(left_x=0.4, left_y=0.6))
+
+    self.assertEqual(srp_client.speed_requests, [(250, 0, 0)])
 
 
 if __name__ == '__main__':
