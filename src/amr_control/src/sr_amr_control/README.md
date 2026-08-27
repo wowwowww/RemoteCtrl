@@ -104,6 +104,7 @@ Note: `loc_laser_points` from SROS protobuf are processed obstacle points (typic
 Subscribers:
 
 - `remote_control_cmd_vel`: `geometry_msgs/Twist` Subscribe to the remote control velocity commands
+- `remote_control_button` (configurable via `button_topic`, default `/rc_ctrl/button`): `sensor_msgs/Joy` Subscribe to the VR/joystick input. The left joystick (`axes[4]`/`axes[5]`) drives the chassis; `buttons[0]` (X) triggers an emergency stop, and `buttons[1]` (Y) releases the emergency stop and enables remote control. Button indices are configurable via `estop_button` (default `0`) and `estop_release_button` (default `1`).
 
 ## Examples
 

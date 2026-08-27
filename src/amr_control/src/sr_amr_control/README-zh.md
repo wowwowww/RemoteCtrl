@@ -104,6 +104,7 @@ odom_use_integration 控制 odom -> base_link 的来源：
 订阅（Subscribers）：
 
 - remote_control_cmd_vel：geometry_msgs/Twist，订阅遥控速度指令
+- remote_control_button（可通过 button_topic 配置，默认 /rc_ctrl/button）：sensor_msgs/Joy，订阅 VR/手柄输入。左摇杆（axes[4]/axes[5]）驱动机器人；buttons[0]（X 键）触发急停，buttons[1]（Y 键）解除急停并开启遥控。按键索引可通过 estop_button（默认 0）与 estop_release_button（默认 1）配置。
 
 ## 错误码
 

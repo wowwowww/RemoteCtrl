@@ -12,9 +12,9 @@ class Twist:
 
 
 class Joy:
-  def __init__(self, axes=None):
+  def __init__(self, axes=None, buttons=None):
     self.axes = list(axes or [])
-    self.buttons = []
+    self.buttons = list(buttons or [])
 
 
 class SetBool:
@@ -60,7 +60,19 @@ def _install_ros_stubs():
   main_pb2.SystemState = type(
     'SystemState',
     (),
-    {'OperationState': type('OperationState', (), {'OPERATION_MANUAL': 'manual'})},
+    {
+      'OperationState': type('OperationState', (), {'OPERATION_MANUAL': 'manual'}),
+      'EmergencyState': type(
+        'EmergencyState',
+        (),
+        {
+          'STATE_EMERGENCY_NA': 0,
+          'STATE_EMERGENCY_NONE': 1,
+          'STATE_EMERGENCY_TRIGGER': 2,
+          'STATE_EMERGENCY_RECOVERABLE': 3,
+        },
+      ),
+    },
   )
   srp = types.ModuleType('sros_sdk_py.srp')
   srp.RequestFailedError = RequestFailedError
@@ -128,12 +140,16 @@ class FakeLogger:
   def __init__(self):
     self.errors = []
     self.infos = []
+    self.warnings = []
 
   def error(self, message):
     self.errors.append(message)
 
   def info(self, message):
     self.infos.append(message)
+
+  def warning(self, message):
+    self.warnings.append(message)
 
 
 class FakeNode:
@@ -160,6 +176,9 @@ class FakeSrpClient:
     self.remote_control_requests = []
     self.oba_requests = []
     self.speed_requests = []
+    self.emergency_stop_calls = []
+    self.release_emergency_stop_calls = []
+    self.system_state = None
 
   def set_remote_control(self, enabled):
     self.remote_control_requests.append(enabled)
@@ -169,6 +188,15 @@ class FakeSrpClient:
 
   def set_remote_control_speed(self, linear_x, linear_y, angular_z):
     self.speed_requests.append((linear_x, linear_y, angular_z))
+
+  def emergency_stop(self):
+    self.emergency_stop_calls.append(True)
+
+  def release_emergency_stop(self):
+    self.release_emergency_stop_calls.append(True)
+
+  def get_current_system_state(self):
+    return self.system_state
 
 
 class FakeStateChecker:
@@ -189,9 +217,15 @@ def make_cmd_vel(linear_x=0.5, linear_y=-0.25, angular_z=0.1):
   return msg
 
 
-def make_joy(left_x=0.0, left_y=0.0):
+def make_joy(left_x=0.0, left_y=0.0, buttons=None):
   axes = [0.0, 0.0, 0.0, 0.0, left_x, left_y, 0.0, 0.0]
-  return Joy(axes=axes)
+  return Joy(axes=axes, buttons=buttons)
+
+
+class FakeSystemState:
+  def __init__(self, emergency_state=1, operation_state=None):
+    self.emergency_state = emergency_state
+    self.operation_state = operation_state
 
 
 class TestRemoteController(unittest.TestCase):
@@ -209,7 +243,7 @@ class TestRemoteController(unittest.TestCase):
     self.assertTrue(response.success)
     self.assertTrue(controller._remote_control_enabled)
     self.assertEqual(srp_client.remote_control_requests, [True])
-    self.assertEqual(srp_client.oba_requests, [True])
+    self.assertEqual(srp_client.oba_requests, [False])
     self.assertEqual(srp_client.speed_requests, [(500, -250, 100)])
 
   def test_successful_disable_closes_cmd_vel_gate(self):
@@ -227,7 +261,7 @@ class TestRemoteController(unittest.TestCase):
     self.assertTrue(response.success)
     self.assertFalse(controller._remote_control_enabled)
     self.assertEqual(srp_client.remote_control_requests, [False])
-    self.assertEqual(srp_client.oba_requests, [True])
+    self.assertEqual(srp_client.oba_requests, [])
     self.assertEqual(srp_client.speed_requests, [])
 
   def test_timeout_preserves_previous_cmd_vel_gate(self):
@@ -246,7 +280,7 @@ class TestRemoteController(unittest.TestCase):
     self.assertFalse(response.success)
     self.assertFalse(controller._remote_control_enabled)
     self.assertEqual(srp_client.remote_control_requests, [True])
-    self.assertEqual(srp_client.oba_requests, [True])
+    self.assertEqual(srp_client.oba_requests, [False])
     self.assertEqual(srp_client.speed_requests, [])
 
   def test_joy_centered_maps_to_stop(self):
@@ -318,6 +352,82 @@ class TestRemoteController(unittest.TestCase):
     controller._handle_button(make_joy(left_x=0.4, left_y=0.6))
 
     self.assertEqual(srp_client.speed_requests, [(250, 0, 0)])
+
+  def test_x_button_triggers_emergency_stop(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._remote_control_enabled = True
+
+    controller._handle_button(make_joy(buttons=[1, 0]))
+
+    self.assertEqual(srp_client.remote_control_requests, [False])
+    self.assertEqual(srp_client.emergency_stop_calls, [True])
+    self.assertFalse(controller._remote_control_enabled)
+
+  def test_x_button_triggers_emergency_stop_even_if_exit_manual_fails(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+
+    def fail_set_remote_control(enabled):
+      raise RequestFailedError(70001)
+
+    srp_client.set_remote_control = fail_set_remote_control
+    controller = remote_controller(FakeNode(), srp_client)
+
+    controller._handle_button(make_joy(buttons=[1, 0]))
+
+    self.assertEqual(srp_client.emergency_stop_calls, [True])
+    self.assertFalse(controller._remote_control_enabled)
+
+  def test_x_button_only_triggers_on_rising_edge(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+
+    controller._handle_button(make_joy(buttons=[1, 0]))
+    controller._handle_button(make_joy(buttons=[1, 0]))
+
+    self.assertEqual(srp_client.emergency_stop_calls, [True])
+
+  def test_y_button_releases_estop_and_enables_remote_control(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    srp_client.system_state = FakeSystemState(emergency_state=1)  # STATE_EMERGENCY_NONE
+    controller._state_checker = FakeStateChecker([True])
+
+    controller._handle_button(make_joy(buttons=[0, 1]))
+
+    self.assertEqual(srp_client.release_emergency_stop_calls, [True])
+    self.assertEqual(srp_client.remote_control_requests, [True])
+    self.assertEqual(srp_client.oba_requests, [False])
+    self.assertTrue(controller._remote_control_enabled)
+
+  def test_y_button_only_triggers_on_rising_edge(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    srp_client.system_state = FakeSystemState(emergency_state=1)
+    controller._state_checker = FakeStateChecker([True])
+
+    controller._handle_button(make_joy(buttons=[0, 1]))
+    controller._handle_button(make_joy(buttons=[0, 1]))
+
+    self.assertEqual(srp_client.release_emergency_stop_calls, [True])
+    self.assertEqual(srp_client.remote_control_requests, [True])
+
+  def test_y_button_does_not_enable_when_estop_still_active(self):
+    remote_controller = _load_remote_controller()
+    srp_client = FakeSrpClient()
+    controller = remote_controller(FakeNode(), srp_client)
+    controller._wait_until_emergency_released = lambda timeout=2.0: False
+
+    controller._handle_button(make_joy(buttons=[0, 1]))
+
+    self.assertEqual(srp_client.release_emergency_stop_calls, [True])
+    self.assertEqual(srp_client.remote_control_requests, [])
+    self.assertFalse(controller._remote_control_enabled)
 
 
 if __name__ == '__main__':

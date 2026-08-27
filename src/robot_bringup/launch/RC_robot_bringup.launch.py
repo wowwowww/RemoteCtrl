@@ -7,8 +7,29 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # Forwarded to RC_ctrl.launch.py so the arm IPs can be overridden from here,
-    # e.g.  ros2 launch jaka_driver dual_arm_teleop.launch.py robot_left_ip:=192.168.71.36
+    # ---- Quest VR reader ----
+    # Publishes /rc_ctrl/left_target, /rc_ctrl/right_target and /rc_ctrl/button
+    # from the VR handles; RC_ctrl subscribes to these to servo the arms.
+    use_wifi_arg = DeclareLaunchArgument(
+        'use_wifi', default_value='true',
+        description='Whether quest_reader auto-switches to wireless adb (falls back to USB)')
+    vr_ip_arg = DeclareLaunchArgument(
+        'vr_ip', default_value='192.168.1.104',
+        description='Quest wireless IP address')
+    vr_port_arg = DeclareLaunchArgument(
+        'vr_port', default_value='5555',
+        description='Quest adb wireless listen port')
+    vr_serial_arg = DeclareLaunchArgument(
+        'vr_serial', default_value='2G97C5ZH5Q0279',
+        description='Quest adb serial (for multi-device)')
+    vr_mac_arg = DeclareLaunchArgument(
+        'vr_mac', default_value='78-C4-FA-CC-88-23',
+        description='Quest wireless MAC, used to auto-resolve its wireless IP (empty disables)')
+    vr_subnet_arg = DeclareLaunchArgument(
+        'vr_subnet', default_value='192.168.1.0/24',
+        description='Subnet to ping-probe when resolving IP from MAC')
+
+    # ---- Dual-arm RC control (left + right rc_ctrl_node) ----
     robot_left_ip_arg = DeclareLaunchArgument(
         'robot_left_ip', default_value='192.168.71.37',
         description='IP address of the left JAKA robot')
@@ -16,9 +37,11 @@ def generate_launch_description():
         'robot_right_ip', default_value='192.168.71.36',
         description='IP address of the right JAKA robot')
     gripper_force_arg = DeclareLaunchArgument(
-        'gripper_force', default_value='20', description='PGI force percentage (20..100)')
+        'gripper_force', default_value='20',
+        description='PGI force percentage (20..100)')
     gripper_speed_arg = DeclareLaunchArgument(
-        'gripper_speed', default_value='100', description='PGI speed percentage (1..100)')
+        'gripper_speed', default_value='100',
+        description='PGI speed percentage (1..100)')
     gripper_baudrate_arg = DeclareLaunchArgument(
         'gripper_baudrate', default_value='115200',
         description='PGI RS485 baud rate (default 115200)')
@@ -63,31 +86,18 @@ def generate_launch_description():
     gripper_button_index_arg = DeclareLaunchArgument(
         'gripper_button_index', default_value='-1',
         description='Joy.buttons index; -1 selects left LTr=10 or right RTr=11')
-    debug_arg = DeclareLaunchArgument(
-        'debug', default_value='false',
-        description='Enable debug logging for rc_ctrl_node')
-    use_wifi_arg = DeclareLaunchArgument(
-        'use_wifi', default_value='true',
-        description='Whether quest_reader auto-switches to wireless adb (falls back to USB)')
-    vr_ip_arg = DeclareLaunchArgument(
-        'vr_ip', default_value='192.168.1.104',
-        description='Quest wireless IP address')
-    vr_port_arg = DeclareLaunchArgument(
-        'vr_port', default_value='5555',
-        description='Quest adb wireless listen port')
-    vr_serial_arg = DeclareLaunchArgument(
-        'vr_serial', default_value='2G97C5ZH5Q0279',
-        description='Quest adb serial (for multi-device)')
-    vr_mac_arg = DeclareLaunchArgument(
-        'vr_mac', default_value='78-C4-FA-CC-88-23',
-        description='Quest wireless MAC, used to auto-resolve its wireless IP (empty disables)')
-    vr_subnet_arg = DeclareLaunchArgument(
-        'vr_subnet', default_value='192.168.1.0/24',
-        description='Subnet to ping-probe when resolving IP from MAC')
 
-    # quest_reader publishes /rc_ctrl/button + /rc_ctrl/{left,right}_target from
-    # the VR handles; rc_ctrl_node connects to the arms and servos on those topics.
-    # Both are required — this file starts them together.
+    # ---- AMR chassis ----
+    connect_ip_arg = DeclareLaunchArgument(
+        'connect_ip', default_value='192.168.71.50',
+        description='AMR control host IP')
+    connect_username_arg = DeclareLaunchArgument(
+        'connect_username', default_value='',
+        description='AMR control host username')
+    connect_passwd_arg = DeclareLaunchArgument(
+        'connect_passwd', default_value='',
+        description='AMR control host password')
+
     quest_reader_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([FindPackageShare('quest_vr'), 'launch', 'quest_reader.launch.py'])
@@ -101,6 +111,7 @@ def generate_launch_description():
             'vr_subnet': LaunchConfiguration('vr_subnet'),
         }.items(),
     )
+
     rc_ctrl_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([FindPackageShare('jaka_driver'), 'launch', 'RC_ctrl.launch.py'])
@@ -125,11 +136,27 @@ def generate_launch_description():
             'gripper_tio_voltage': LaunchConfiguration('gripper_tio_voltage'),
             'gripper_use_button': LaunchConfiguration('gripper_use_button'),
             'gripper_button_index': LaunchConfiguration('gripper_button_index'),
-            'debug': LaunchConfiguration('debug'),
+        }.items(),
+    )
+
+    amr_control_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([FindPackageShare('sr_amr_control'), 'launch', 'amr_control.launch.py'])
+        ]),
+        launch_arguments={
+            'connect_ip': LaunchConfiguration('connect_ip'),
+            'connect_username': LaunchConfiguration('connect_username'),
+            'connect_passwd': LaunchConfiguration('connect_passwd'),
         }.items(),
     )
 
     return LaunchDescription([
+        use_wifi_arg,
+        vr_ip_arg,
+        vr_port_arg,
+        vr_serial_arg,
+        vr_mac_arg,
+        vr_subnet_arg,
         robot_left_ip_arg,
         robot_right_ip_arg,
         gripper_force_arg,
@@ -149,13 +176,10 @@ def generate_launch_description():
         gripper_tio_voltage_arg,
         gripper_use_button_arg,
         gripper_button_index_arg,
-        debug_arg,
-        use_wifi_arg,
-        vr_ip_arg,
-        vr_port_arg,
-        vr_serial_arg,
-        vr_mac_arg,
-        vr_subnet_arg,
+        connect_ip_arg,
+        connect_username_arg,
+        connect_passwd_arg,
         quest_reader_launch,
         rc_ctrl_launch,
+        amr_control_launch,
     ])

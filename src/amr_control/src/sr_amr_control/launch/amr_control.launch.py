@@ -8,7 +8,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
   declared_args = [
     DeclareLaunchArgument(
-      'connect_ip',
+      'connect_ip',default_value='192.168.71.50'
     ),
     DeclareLaunchArgument('connect_username', default_value=''),
     DeclareLaunchArgument('connect_passwd', default_value=''),

@@ -71,6 +71,13 @@ class RemoteController:
     self._max_angular_speed = float(
       node.declare_parameter('joy_max_angular_speed', 0.8).value
     )
+    self._estop_button = int(node.declare_parameter('estop_button', 0).value)
+    self._estop_release_button = int(
+      node.declare_parameter('estop_release_button', 1).value
+    )
+
+    self._estop_button_prev = False
+    self._estop_release_button_prev = False
 
     self._remote_control_enabled_srv = node.create_service(
       SetBool,
@@ -127,42 +134,121 @@ class RemoteController:
 
     return twist
 
+  def _button_pressed(self, msg: Joy, index: int) -> bool:
+    return index < len(msg.buttons) and bool(msg.buttons[index])
+
+  def _handle_estop_buttons(self, msg: Joy):
+    estop_pressed = self._button_pressed(msg, self._estop_button)
+    release_pressed = self._button_pressed(msg, self._estop_release_button)
+
+    if estop_pressed and not self._estop_button_prev:
+      self._trigger_emergency_stop()
+    if release_pressed and not self._estop_release_button_prev:
+      self._release_emergency_stop_and_enable()
+
+    self._estop_button_prev = estop_pressed
+    self._estop_release_button_prev = release_pressed
+
+  def _trigger_emergency_stop(self):
+    self._remote_control_enabled = False
+    # 急停前先退出遥控，使 operation_state 切离 OPERATION_MANUAL。急停本身不会
+    # 改变 operation_state；若保持 MANUAL，Y 解除后重新 enable_manual_control 会
+    # 命中 070006（ALREADY_IN_MANUAL_CONTROL）被当作失败，速度门无法重新打开。
+    # 未处于手动模式时退出遥控会返回 070001，属正常情况，忽略即可。
+    try:
+      self._srp_client.set_remote_control(False)
+    except RequestFailedError as e:
+      self._node.get_logger().warning(
+        f'Exit remote control before emergency stop failed, error_code: {e.result_code}'
+      )
+    try:
+      self._srp_client.emergency_stop()
+      self._node.get_logger().info('Emergency stop triggered by button')
+    except RequestFailedError as e:
+      self._node.get_logger().error(
+        f'Emergency stop failed, error_code: {e.result_code}'
+      )
+
+  def _release_emergency_stop_and_enable(self):
+    try:
+      self._srp_client.release_emergency_stop()
+    except RequestFailedError as e:
+      self._node.get_logger().error(
+        f'Release emergency stop failed, error_code: {e.result_code}'
+      )
+      return
+
+    if not self._wait_until_emergency_released():
+      return
+
+    self._set_remote_control(True)
+
+  def _is_emergency_stopped(self):
+    state = self._srp_client.get_current_system_state()
+    if state is None:
+      return None
+    es_state = state.emergency_state
+    State = SystemState.EmergencyState
+    return (
+      es_state != State.STATE_EMERGENCY_NA
+      and es_state != State.STATE_EMERGENCY_NONE
+    )
+
+  def _wait_until_emergency_released(self, timeout: float = 5.0) -> bool:
+    # RECOVERABLE(3) 表示急停触源已释放、可恢复，但 cancel_emergency 之后从
+    # RECOVERABLE 清到 NONE(1) 需要电机/安全系统重新初始化，耗时可能超过 2 秒，
+    # 因此这里放宽到 5 秒（与 _TIMEOUT_SEC 一致），避免误判为解除失败。
+    start_time = time.monotonic()
+    last_emergency_state = None
+    while time.monotonic() - start_time < timeout:
+      state = self._srp_client.get_current_system_state()
+      if state is not None:
+        last_emergency_state = state.emergency_state
+      if self._is_emergency_stopped() is False:
+        return True
+      time.sleep(0.1)
+    self._node.get_logger().error(
+      'Timeout waiting for emergency stop to clear, '
+      f'emergency_state stayed at {last_emergency_state}'
+    )
+    return False
+
   def _handle_button(self, msg: Joy):
+    self._handle_estop_buttons(msg)
     self._handle_cmd_vel(self._joy_to_twist(msg))
 
-  def _handle_remote_control_enabled(
-    self, request: SetBool.Request, response: SetBool.Response
-  ):
-    target_enable = request.data
-
+  def _set_remote_control(self, target_enable: bool):
     try:
       self._srp_client.set_remote_control(target_enable)
-      self._srp_client.set_remote_control_oba(True)
+      if target_enable:
+        # 手动遥控时禁用避障（OBA），避免避障拦截速度指令
+        self._srp_client.set_remote_control_oba(False)
     except RequestFailedError as e:
       self._node.get_logger().error(
         f'Remote control srv called failed, error_code: {e.result_code}'
       )
-      response.success = False
-      response.message = f'{e.result_code}'
-      return response
+      return False, f'{e.result_code}'
 
     start_time = time.monotonic()
 
     while time.monotonic() - start_time < self._TIMEOUT_SEC:
       time.sleep(0.1)
       if self._state_checker.check_remote_control_status(target_enable):
-        response.success = True
-        response.message = f'Remote control successfully set to {target_enable}.'
         self._remote_control_enabled = target_enable
         self._node.get_logger().info(
           f'Remote control state transitioned to {target_enable} successfully.'
         )
-        return response
+        return True, f'Remote control successfully set to {target_enable}.'
 
-    response.success = False
-    response.message = f'Timeout ({self._TIMEOUT_SEC}s) while waiting for remote control state to switch to {target_enable}'  # noqa: E501
-    self._node.get_logger().error(f'Remote control command FAILED: {response.message}')
+    message = f'Timeout ({self._TIMEOUT_SEC}s) while waiting for remote control state to switch to {target_enable}'  # noqa: E501
+    self._node.get_logger().error(f'Remote control command FAILED: {message}')
 
+    return False, message
+
+  def _handle_remote_control_enabled(
+    self, request: SetBool.Request, response: SetBool.Response
+  ):
+    response.success, response.message = self._set_remote_control(request.data)
     return response
 
   def _handle_remote_control_oba_enabled(
