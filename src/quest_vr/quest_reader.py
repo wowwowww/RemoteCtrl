@@ -10,10 +10,12 @@
 """
 
 import math
+import re
 import shlex
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -242,6 +244,10 @@ class QuestReader(Node):
         self.vr_ip = self.declare_parameter('vr_ip', '192.168.1.104').value
         self.vr_port = self.declare_parameter('vr_port', 5555).value
         self.vr_serial = self.declare_parameter('vr_serial', '2G97C5ZH5Q0279').value
+        # 通过 MAC 自动解析 Quest 无线 IP（空串表示关闭，直接用 vr_ip）
+        self.vr_mac = self.declare_parameter('vr_mac', '78-C4-FA-CC-88-23').value
+        # 待扫描网段（用于 MAC 解析时 ping 探测；默认与 vr_ip 同网段）
+        self.vr_subnet = self.declare_parameter('vr_subnet', '192.168.1.0/24').value
 
         # 发布者
         self.left_pub = self.create_publisher(PoseStamped, left_topic, 5)
@@ -326,6 +332,56 @@ class QuestReader(Node):
                 devices.append(parts[0])
         return devices
 
+    def _normalize_mac(self, mac):
+        """MAC 归一化为纯小写 hex，忽略分隔符（':'/'-'），失败返回 ''。"""
+        return ''.join(c for c in str(mac).lower() if c in '0123456789abcdef')
+
+    def _arp_ip_for_mac(self, mac):
+        """解析系统 ARP 表，返回匹配 mac 的 IP，无则 None。"""
+        target = self._normalize_mac(mac)
+        if not target:
+            return None
+        mac_re = re.compile(r'([0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5})')
+        ip_re = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+        for cmd in (['ip', 'neigh', 'show'], ['arp', '-a']):  # iproute2 优先，net-tools 兜底
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0).stdout
+            except Exception:
+                continue
+            for line in out.splitlines():
+                m = mac_re.search(line)
+                if not m or self._normalize_mac(m.group(1)) != target:
+                    continue
+                ipm = ip_re.search(line)
+                if ipm:
+                    return ipm.group(1)
+        return None
+
+    def _resolve_ip_from_mac(self, mac):
+        """从 MAC 解析无线 IP：先广播 ping 填 ARP，再读表；失败则并行扫子网兜底。"""
+        # 计算 /24 网段主机列表
+        base = self.vr_subnet.rsplit('.', 1)[0]  # 形如 '192.168.1.0/24' -> '192.168.1'
+        hosts = ['%s.%d' % (base, i) for i in range(1, 255)]
+        # 1) 广播 ping 快速填充 ARP
+        try:
+            subprocess.run(['ping', '-c', '1', '-W', '1', '-b', '%s.255' % base],
+                           capture_output=True, timeout=5.0)
+        except Exception:
+            pass
+        ip = self._arp_ip_for_mac(mac)
+        if ip:
+            return ip
+        # 2) 全子网并行 ping 兜底（32 线程，单次 -W 1）
+        def _ping(h):
+            try:
+                subprocess.run(['ping', '-c', '1', '-W', '1', h],
+                               capture_output=True, timeout=2.0)
+            except Exception:
+                pass
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            list(ex.map(_ping, hosts))
+        return self._arp_ip_for_mac(mac)
+
     def _setup_adb_connection(self):
         """建立 adb 连接并返回后续命令前缀。
 
@@ -337,6 +393,16 @@ class QuestReader(Node):
         """
         if not self.use_wifi:
             return ['adb']
+
+        # 优先按 MAC 解析当前无线 IP（覆盖可能已失效的 vr_ip）
+        if self.vr_mac:
+            resolved = self._resolve_ip_from_mac(self.vr_mac)
+            if resolved:
+                self.get_logger().info('从 MAC %s 解析到 Quest 无线 IP %s' % (self.vr_mac, resolved))
+                self.vr_ip = resolved
+            else:
+                self.get_logger().warning(
+                    '未能从 MAC %s 解析 IP，回退 vr_ip=%s' % (self.vr_mac, self.vr_ip))
 
         if not self.vr_ip:
             self.get_logger().warning('use_wifi=true 但未设置 vr_ip，回退有线 adb')

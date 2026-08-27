@@ -5,13 +5,16 @@
 sdk_lib_version--2.2.2
 
 #头显无线连接（自动）
-启动时自动连接无线 adb（use_wifi 默认 true，vr_ip 默认 192.168.1.104）：
+启动时自动连接无线 adb（use_wifi 默认 true）：
 ros2 launch jaka_driver dual_arm_teleop.launch.py
-# 日志提示"已成功无线连接 192.168.1.104:5555，可拔掉USB线"后即可拔掉 USB；
-# 无线连接失败自动回退有线；IP 变化时用 vr_ip:=<Quest无线IP> 覆盖，多设备时用 vr_serial:=<序列号> 指定。
+# 头显无线连接MAC：78-C4-FA-CC-88-23（vr_mac 默认值）。
+# 启动时按 vr_mac 自动从 ARP 表解析 Quest 当前无线 IP 并连接（无需每次手动改 IP）；
+# 日志提示"已成功无线连接 <ip>:5555，可拔掉USB线"后即可拔掉 USB。
+# 无线连接失败自动回退有线；解析失败回退 vr_ip 默认 192.168.1.104。
+# 覆盖方式：MAC 变化用 vr_mac:=<MAC>，网段变化用 vr_subnet:=<网段>（默认 192.168.1.0/24），
+# 关闭自动解析用 vr_mac:=（空串），多设备时用 vr_serial:=<序列号> 指定。
 # 手动方式（可选）：
 adb tcpip 5555#开启监听端口
-头显无线连接MAC：78-C4-FA-CC-88-23 
 
 #项目编译与加载
 cd  workplace/RemoteCtrl

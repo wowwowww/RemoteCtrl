@@ -78,6 +78,12 @@ def generate_launch_description():
     vr_serial_arg = DeclareLaunchArgument(
         'vr_serial', default_value='2G97C5ZH5Q0279',
         description='Quest adb serial (for multi-device)')
+    vr_mac_arg = DeclareLaunchArgument(
+        'vr_mac', default_value='78-C4-FA-CC-88-23',
+        description='Quest wireless MAC, used to auto-resolve its wireless IP (empty disables)')
+    vr_subnet_arg = DeclareLaunchArgument(
+        'vr_subnet', default_value='192.168.1.0/24',
+        description='Subnet to ping-probe when resolving IP from MAC')
 
     # quest_reader publishes /rc_ctrl/button + /rc_ctrl/{left,right}_target from
     # the VR handles; rc_ctrl_node connects to the arms and servos on those topics.
@@ -91,6 +97,8 @@ def generate_launch_description():
             'vr_ip': LaunchConfiguration('vr_ip'),
             'vr_port': LaunchConfiguration('vr_port'),
             'vr_serial': LaunchConfiguration('vr_serial'),
+            'vr_mac': LaunchConfiguration('vr_mac'),
+            'vr_subnet': LaunchConfiguration('vr_subnet'),
         }.items(),
     )
     rc_ctrl_launch = IncludeLaunchDescription(
@@ -146,6 +154,8 @@ def generate_launch_description():
         vr_ip_arg,
         vr_port_arg,
         vr_serial_arg,
+        vr_mac_arg,
+        vr_subnet_arg,
         quest_reader_launch,
         rc_ctrl_launch,
     ])

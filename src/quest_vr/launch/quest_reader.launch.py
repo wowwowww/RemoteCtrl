@@ -54,6 +54,12 @@ def generate_launch_description():
     vr_serial_arg = DeclareLaunchArgument(
         'vr_serial', default_value='2G97C5ZH5Q0279',
         description='多设备时指定目标 adb 序列号（adb devices 查看）')
+    vr_mac_arg = DeclareLaunchArgument(
+        'vr_mac', default_value='78-C4-FA-CC-88-23',
+        description='Quest 无线 MAC，用于自动解析无线 IP（空串关闭）')
+    vr_subnet_arg = DeclareLaunchArgument(
+        'vr_subnet', default_value='192.168.1.0/24',
+        description='MAC 解析时 ping 探测的网段')
 
     quest_reader_node = Node(
         package='quest_vr',
@@ -77,6 +83,8 @@ def generate_launch_description():
             'vr_ip': LaunchConfiguration('vr_ip'),
             'vr_port': ParameterValue(LaunchConfiguration('vr_port'), value_type=int),
             'vr_serial': LaunchConfiguration('vr_serial'),
+            'vr_mac': LaunchConfiguration('vr_mac'),
+            'vr_subnet': LaunchConfiguration('vr_subnet'),
             # 静态 TF：眼镜原点在机器人基坐标系下的位姿（标定后填）
             'tf_translation': [0.0, 0.0, 0.0],
             'tf_rotation': [1.0, 0.0, 0.0, 0.0],
@@ -100,5 +108,7 @@ def generate_launch_description():
         vr_ip_arg,
         vr_port_arg,
         vr_serial_arg,
+        vr_mac_arg,
+        vr_subnet_arg,
         quest_reader_node,
     ])
