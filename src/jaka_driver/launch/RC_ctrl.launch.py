@@ -88,6 +88,12 @@ def generate_launch_description():
     gripper_button_index_arg = DeclareLaunchArgument(
         'gripper_button_index', default_value='-1',
         description='Joy.buttons index; -1 selects left LTr=10 or right RTr=11')
+    use_rpy_ctrl_arg = DeclareLaunchArgument(
+        'use_rpy_ctrl', default_value='false',
+        description='true = teleop controls orientation too; false = position only')
+    enable_y_limit_arg = DeclareLaunchArgument(
+        'enable_y_limit', default_value='true',
+        description='true = clamp arm TCP y (left > -110 mm, right < 110 mm)')
 
     # One process per arm: the JAKA SDK holds a single global connection per
     # process, so each rc_ctrl_node instance drives exactly one robot. Two
@@ -123,6 +129,8 @@ def generate_launch_description():
             'gripper_tio_voltage': ParameterValue(LaunchConfiguration('gripper_tio_voltage'), value_type=int),
             'gripper_use_button': ParameterValue(LaunchConfiguration('gripper_use_button'), value_type=bool),
             'gripper_button_index': ParameterValue(LaunchConfiguration('gripper_button_index'), value_type=int),
+            'use_rpy_ctrl': ParameterValue(LaunchConfiguration('use_rpy_ctrl'), value_type=bool),
+            'enable_y_limit': ParameterValue(LaunchConfiguration('enable_y_limit'), value_type=bool),
         }]
     )
     rc_ctrl_right_node = Node(
@@ -155,6 +163,8 @@ def generate_launch_description():
             'gripper_tio_voltage': ParameterValue(LaunchConfiguration('gripper_tio_voltage'), value_type=int),
             'gripper_use_button': ParameterValue(LaunchConfiguration('gripper_use_button'), value_type=bool),
             'gripper_button_index': ParameterValue(LaunchConfiguration('gripper_button_index'), value_type=int),
+            'use_rpy_ctrl': ParameterValue(LaunchConfiguration('use_rpy_ctrl'), value_type=bool),
+            'enable_y_limit': ParameterValue(LaunchConfiguration('enable_y_limit'), value_type=bool),
         }]
     )
 
@@ -182,6 +192,8 @@ def generate_launch_description():
         gripper_tio_voltage_arg,
         gripper_use_button_arg,
         gripper_button_index_arg,
+        use_rpy_ctrl_arg,
+        enable_y_limit_arg,
         rc_ctrl_left_node,
         rc_ctrl_right_node,
         LogInfo(msg="RC control nodes launched.")

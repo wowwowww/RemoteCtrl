@@ -85,6 +85,11 @@ bool gripper_linear = true; // true = linear (analog axes), false = digital (but
 double gripper_trigger_deadband = 0.02; // minimal change to send new Grip()
 double prev_gripper_trigger = 0.0;
 std::unique_ptr<pgi140::Pgi140Gripper> gripper;
+bool use_rpy_ctrl = false;  // false = position-only teleop, true = position + attitude
+bool enable_y_limit = true; // true = clamp arm TCP y to its workspace range
+bool arm_is_right = false;  // mirror of arm_name == "right"
+double arm_tcp_y_at_grip = 0.0; // arm's absolute TCP y captured at grip press (mm)
+bool arm_tcp_valid = false;     // whether the grip-time TCP read succeeded
 
 // Quaternion is (s, x, y, z) with s the scalar, matching ROS (w, x, y, z).
 Quaternion quat_conjugate(const Quaternion &q)
@@ -133,6 +138,7 @@ constexpr double SERVO_TRAN_DEADBAND = 0.5;   // mm: ignore smaller translation 
 constexpr double SERVO_ROT_DEADBAND = 0.005;  // rad (~0.29 deg): ignore smaller rotation deltas
 constexpr double SERVO_MAX_TRAN_STEP = 5.0;   // mm per cycle (~125 mm/s)
 constexpr double SERVO_MAX_ROT_STEP = 0.05;  // rad per cycle (~36 deg/s)
+constexpr double Y_LIMIT_MM = 110.0;         // workspace y boundary: left > -110, right < +110
 
 // Drive one arm to track the controller's displacement since grip press, in
 // Cartesian space. servo_p is sent one per-cycle INCR delta — the same
@@ -154,40 +160,75 @@ void servo_cartesian(JAKAZuRobot &robot,
     CtrlPose ctrl_now;
     pose_to_ctrl(*msg, ctrl_now);
 
+    // Workspace y-limit: an absolute one-way barrier on the arm's TCP y so the
+    // two arms never cross the shared center line. The commanded absolute
+    // position is "TCP at grip + handle offset since grip"; we clamp the handle
+    // target BEFORE computing the increment, so the arm stops exactly at the
+    // boundary and is never commanded a reverse (pull-back) motion. No per-cycle
+    // read-back, so there is no staleness and no bounce.
+    if (enable_y_limit && arm_tcp_valid)
+    {
+        double pred_y = arm_tcp_y_at_grip + (ctrl_now.tran.y - ctrl_origin.tran.y);
+        if (arm_is_right && pred_y > Y_LIMIT_MM)
+            ctrl_now.tran.y = ctrl_origin.tran.y + (Y_LIMIT_MM - arm_tcp_y_at_grip);
+        else if (!arm_is_right && pred_y < -Y_LIMIT_MM)
+            ctrl_now.tran.y = ctrl_origin.tran.y + (-Y_LIMIT_MM - arm_tcp_y_at_grip);
+    }
+
     CartesianPose incr;
     // Per-cycle translation increment (vector subtraction is exact).
     incr.tran.x = ctrl_now.tran.x - ctrl_prev.tran.x;
     incr.tran.y = ctrl_now.tran.y - ctrl_prev.tran.y;
     incr.tran.z = ctrl_now.tran.z - ctrl_prev.tran.z;
 
-    // Per-cycle orientation increment: q_incr = q_now * q_prev^-1, a
-    // near-identity rotation that converts back to RPY without singularities.
-    Quaternion q_incr = quat_mul(ctrl_now.quat, quat_conjugate(ctrl_prev.quat));
-    RotMatrix rot_incr;
-    if (robot.quaternion_to_rot_matrix(&q_incr, &rot_incr) != 0)
+    // Attitude control is optional: when use_rpy_ctrl is false the handle only
+    // drives translation and the arm holds its current orientation (rpy == 0).
+    double max_rot = 0.0;
+    incr.rpy.rx = 0.0;
+    incr.rpy.ry = 0.0;
+    incr.rpy.rz = 0.0;
+    if (use_rpy_ctrl)
     {
-        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                    "[%s] failed to convert quaternion to rot matrix", arm_name);
-        return;
-    }
-    if (robot.rot_matrix_to_rpy(&rot_incr, &incr.rpy) != 0)
-    {
-        RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
-                    "[%s] failed to convert rot matrix to RPY", arm_name);
-        return;
+        // Per-cycle orientation increment: q_incr = q_now * q_prev^-1, a
+        // near-identity rotation that converts back to RPY without singularities.
+        Quaternion q_incr = quat_mul(ctrl_now.quat, quat_conjugate(ctrl_prev.quat));
+        RotMatrix rot_incr;
+        if (robot.quaternion_to_rot_matrix(&q_incr, &rot_incr) != 0)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] failed to convert quaternion to rot matrix", arm_name);
+            return;
+        }
+        if (robot.rot_matrix_to_rpy(&rot_incr, &incr.rpy) != 0)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("rc_ctrl"),
+                        "[%s] failed to convert rot matrix to RPY", arm_name);
+            return;
+        }
+
+        max_rot = std::max(std::fabs(incr.rpy.rx),
+                 std::max(std::fabs(incr.rpy.ry), std::fabs(incr.rpy.rz)));
+        if (max_rot > SERVO_MAX_ROT_STEP)
+        {
+            double s = SERVO_MAX_ROT_STEP / max_rot;
+            incr.rpy.rx *= s;
+            incr.rpy.ry *= s;
+            incr.rpy.rz *= s;
+        }
+        incr.rpy.rx = -incr.rpy.rx;
+        incr.rpy.ry = -incr.rpy.ry;
+        incr.rpy.rz = -incr.rpy.rz;
     }
 
     // Deadband: hold in place instead of chasing sub-mm / sub-degree handle noise.
     double max_tran = std::max(std::fabs(incr.tran.x),
                       std::max(std::fabs(incr.tran.y), std::fabs(incr.tran.z)));
-    double max_rot = std::max(std::fabs(incr.rpy.rx),
-                     std::max(std::fabs(incr.rpy.ry), std::fabs(incr.rpy.rz)));
-    if (max_tran < SERVO_TRAN_DEADBAND && max_rot < SERVO_ROT_DEADBAND)
+    if (max_tran < SERVO_TRAN_DEADBAND && (!use_rpy_ctrl || max_rot < SERVO_ROT_DEADBAND))
         return;
 
-    // Velocity clamp: scale translation and rotation separately, each to its own
-    // per-cycle cap, preserving direction. A fast handle swing moves the arm at
-    // the capped speed instead of commanding an overspeed Cartesian move.
+    // Velocity clamp: scale translation to its per-cycle cap, preserving
+    // direction. A fast handle swing moves the arm at the capped speed instead
+    // of commanding an overspeed Cartesian move.
     if (max_tran > SERVO_MAX_TRAN_STEP)
     {
         double s = SERVO_MAX_TRAN_STEP / max_tran;
@@ -195,16 +236,6 @@ void servo_cartesian(JAKAZuRobot &robot,
         incr.tran.y *= s;
         incr.tran.z *= s;
     }
-    if (max_rot > SERVO_MAX_ROT_STEP)
-    {
-        double s = SERVO_MAX_ROT_STEP / max_rot;
-        incr.rpy.rx *= s;
-        incr.rpy.ry *= s;
-        incr.rpy.rz *= s;
-    }
-    incr.rpy.rx=-incr.rpy.rx;
-    incr.rpy.ry=-incr.rpy.ry;
-    incr.rpy.rz=-incr.rpy.rz;
 
     int ret = robot.servo_p(&incr, MoveMode::INCR);
     if (ret != 0)
@@ -358,6 +389,13 @@ void rearm_worker()
             std::lock_guard<std::mutex> lk(latest_mtx);
             pose_to_ctrl(latest_pose, origin);
         }
+        // Capture the arm's absolute TCP y once at grip press so the workspace
+        // y-limit is enforced against the actual position (grip TCP + handle
+        // offset) without a stale per-cycle read-back.
+        CartesianPose tcp_at_grip;
+        arm_tcp_valid = (robot.get_tcp_position(&tcp_at_grip) == 0);
+        if (arm_tcp_valid)
+            arm_tcp_y_at_grip = tcp_at_grip.tran.y;
         // Write origin/prev BEFORE publishing gripped=true so the atomic gate
         // makes these writes visible to target_callback.
         ctrl_origin = origin;
@@ -591,6 +629,7 @@ int main(int argc, char *argv[])
     // starts two instances (arm_name left / right).
     arm_name = node->declare_parameter<string>("arm_name", "left");
     bool is_right = (arm_name == "right");
+    arm_is_right = is_right;
     string default_ip = is_right ? "192.168.71.36" : "192.168.71.37";
     string default_topic = is_right ? "/rc_ctrl/right_target" : "/rc_ctrl/left_target";
     int default_grip_axis = is_right ? 1 : 0;
@@ -646,6 +685,8 @@ int main(int argc, char *argv[])
 
     
    debug = node->declare_parameter<bool>("debug", false);
+   use_rpy_ctrl = node->declare_parameter<bool>("use_rpy_ctrl", false);
+   enable_y_limit = node->declare_parameter<bool>("enable_y_limit", true);
 
 
     gripper = std::make_unique<pgi140::Pgi140Gripper>(robot, gripper_config);

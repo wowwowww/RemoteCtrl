@@ -63,6 +63,12 @@ def generate_launch_description():
     gripper_button_index_arg = DeclareLaunchArgument(
         'gripper_button_index', default_value='-1',
         description='Joy.buttons index; -1 selects left LTr=10 or right RTr=11')
+    use_rpy_ctrl_arg = DeclareLaunchArgument(
+        'use_rpy_ctrl', default_value='false',
+        description='true = teleop controls orientation too; false = position only')
+    enable_y_limit_arg = DeclareLaunchArgument(
+        'enable_y_limit', default_value='true',
+        description='true = clamp arm TCP y (left > -110 mm, right < 110 mm)')
     debug_arg = DeclareLaunchArgument(
         'debug', default_value='false',
         description='Enable debug logging for rc_ctrl_node')
@@ -125,6 +131,8 @@ def generate_launch_description():
             'gripper_tio_voltage': LaunchConfiguration('gripper_tio_voltage'),
             'gripper_use_button': LaunchConfiguration('gripper_use_button'),
             'gripper_button_index': LaunchConfiguration('gripper_button_index'),
+            'use_rpy_ctrl': LaunchConfiguration('use_rpy_ctrl'),
+            'enable_y_limit': LaunchConfiguration('enable_y_limit'),
             'debug': LaunchConfiguration('debug'),
         }.items(),
     )
@@ -149,6 +157,8 @@ def generate_launch_description():
         gripper_tio_voltage_arg,
         gripper_use_button_arg,
         gripper_button_index_arg,
+        use_rpy_ctrl_arg,
+        enable_y_limit_arg,
         debug_arg,
         use_wifi_arg,
         vr_ip_arg,
