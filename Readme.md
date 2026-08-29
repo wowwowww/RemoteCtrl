@@ -49,6 +49,11 @@ ros2 launch sr_amr_control amr_control.launch.py
 ## 全身启动（这个这个这个这个！......还有这个！！！！）
 ros2 launch robot_bringup RC_robot_bringup.launch.py
 
+
+# 启动参数
+use_rpy_ctrl
+enable_y_limit
+
 # 操作方式：
 按下手柄侧键介入控制，机械臂末端法兰位置与姿态与手柄随动，松开侧键停止控制；
 按下扳机键控制夹爪开合，夹爪随扳机按下程度闭合；
