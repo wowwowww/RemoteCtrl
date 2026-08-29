@@ -1,10 +1,12 @@
 #include <iostream>
 #include <string>
 #include <map>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <cmath>
 #include <memory>
+#include <mutex>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -50,11 +52,27 @@ struct CtrlPose {
 
 // Teleop state: whether the grip is currently held, the controller pose captured
 // at the press instant, and the latest controller pose.
-bool gripped = false;
+//
+// `gripped` is the cross-thread gate between the background re-arm thread and the
+// target callback: re-arm writes ctrl_origin/ctrl_prev BEFORE setting gripped=true,
+// and target_callback only reads them AFTER observing gripped==true, so the atomic
+// store/load establishes the needed happens-before (no data race). While re-arming
+// (gripped false) the target callback does nothing, so the SDK is never touched
+// concurrently by servo_p and the re-arm sequence.
+std::atomic<bool> gripped{false};
+std::atomic<bool> rearming{false};
+// Latest grip state, mirrored here so the re-arm thread can check whether the
+// grip is STILL held when it finishes (a press-then-release during re-arm must
+// not leave the arm tracking).
+std::atomic<bool> grip_now{false};
+std::thread rearm_thread;
 bool debug = false;
 CtrlPose ctrl_origin;   // controller pose at grip press (origin)
 CtrlPose ctrl_prev;     // last controller pose we commanded
-geometry_msgs::msg::PoseStamped::SharedPtr latest;
+// Latest target pose (stored by value under a mutex: it is written by the target
+// callback every cycle and read by the re-arm thread at grip press).
+geometry_msgs::msg::PoseStamped latest_pose;
+std::mutex latest_mtx;
 // Whether the arm connected successfully at startup (login_in == 0). A failed
 // arm is skipped for power_on/enable/servo.
 bool arm_ok = false;
@@ -94,18 +112,18 @@ Quaternion quat_mul(const Quaternion &a, const Quaternion &b)
 // Convert a PoseStamped (position in meters + quaternion) into a controller pose
 // (translation in mm + quaternion). No RPY conversion here — the RPY delta is
 // computed from quaternions in servo_cartesian().
-void pose_to_ctrl(const geometry_msgs::msg::PoseStamped::SharedPtr msg,
+void pose_to_ctrl(const geometry_msgs::msg::PoseStamped &msg,
                   CtrlPose &pose)
 {
     // ROS uses meters, the JAKA SDK uses millimeters.
-    pose.tran.x = msg->pose.position.x * 1000.0;
-    pose.tran.y = msg->pose.position.y * 1000.0;
-    pose.tran.z = msg->pose.position.z * 1000.0;
+    pose.tran.x = msg.pose.position.x * 1000.0;
+    pose.tran.y = msg.pose.position.y * 1000.0;
+    pose.tran.z = msg.pose.position.z * 1000.0;
 
-    pose.quat.s = msg->pose.orientation.w;
-    pose.quat.x = msg->pose.orientation.x;
-    pose.quat.y = msg->pose.orientation.y;
-    pose.quat.z = msg->pose.orientation.z;
+    pose.quat.s = msg.pose.orientation.w;
+    pose.quat.x = msg.pose.orientation.x;
+    pose.quat.y = msg.pose.orientation.y;
+    pose.quat.z = msg.pose.orientation.z;
 }
 
 // Per-cycle Cartesian servo limits. servo_p is fed one increment per 8 ms
@@ -134,7 +152,7 @@ void servo_cartesian(JAKAZuRobot &robot,
                      const char *arm_name)
 {
     CtrlPose ctrl_now;
-    pose_to_ctrl(msg, ctrl_now);
+    pose_to_ctrl(*msg, ctrl_now);
 
     CartesianPose incr;
     // Per-cycle translation increment (vector subtraction is exact).
@@ -325,35 +343,54 @@ bool ensure_arm_ready(JAKAZuRobot &robot)
     return true;
 }
 
+// Re-arm the robot in a background thread. The slow ensure_arm_ready sequence
+// (power_on/enable/servo with multi-second settles) must NOT run in the executor
+// thread, or it freezes target_callback for 12+ s. It also must NOT run
+// concurrently with servo_p — the JAKA SDK holds one connection per process — so
+// target_callback stays idle (gripped false) until this finishes.
+void rearm_worker()
+{
+    bool ok = ensure_arm_ready(robot);
+    if (ok && grip_now)
+    {
+        CtrlPose origin;
+        {
+            std::lock_guard<std::mutex> lk(latest_mtx);
+            pose_to_ctrl(latest_pose, origin);
+        }
+        // Write origin/prev BEFORE publishing gripped=true so the atomic gate
+        // makes these writes visible to target_callback.
+        ctrl_origin = origin;
+        ctrl_prev = origin;
+        gripped = true;
+        RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
+                    "[%s] gripped, ctrl_origin=(%.1f,%.1f,%.1f)mm",
+                    arm_name.c_str(),
+                    ctrl_origin.tran.x, ctrl_origin.tran.y, ctrl_origin.tran.z);
+    }
+    rearming = false;
+}
+
 // Update the grip state for one arm. On the rising edge (grip crosses 0.5) we
-// re-arm the robot if protection dropped it, capture the controller pose as the
-// origin, and begin tracking; on release we stop commanding so the arm holds.
-void handle_grip(bool &gripped, float value,
-                 const geometry_msgs::msg::PoseStamped::SharedPtr &latest,
-                 CtrlPose &ctrl_origin,
-                 CtrlPose &ctrl_prev,
-                 const char *arm_name)
+// kick off a background re-arm + origin capture; on release we send one explicit
+// hold and stop tracking. While not gripped the target callback sends nothing
+// (stopping INCR already holds the arm), so no per-cycle hold is needed.
+void handle_grip(float value)
 {
     bool now = value > 0.5f;
-    if (now && !gripped)
+    grip_now = now;  // mirror current grip so the re-arm thread can check it
+    if (now && !gripped && !rearming)
     {
-        // Re-arm before capturing the origin so the arm is actually in servo
-        // when we start sending servo_p deltas.
-        ensure_arm_ready(robot);
-
-        if (latest)
-        {
-            pose_to_ctrl(latest, ctrl_origin);
-            ctrl_prev = ctrl_origin;
-            gripped = true;
-            RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
-                        "[%s] gripped, ctrl_origin=(%.1f,%.1f,%.1f)mm",
-                        arm_name,
-                        ctrl_origin.tran.x, ctrl_origin.tran.y, ctrl_origin.tran.z);
-        }
+        // Reap a previous, already-finished re-arm thread before overwriting the
+        // std::thread (assigning to a joinable std::thread would terminate).
+        if (rearm_thread.joinable())
+            rearm_thread.join();
+        rearming = true;
+        rearm_thread = std::thread(rearm_worker);
     }
-    else if (!now)
+    else if (!now && gripped)
     {
+        servo_hold(robot);
         gripped = false;
     }
 }
@@ -362,15 +399,16 @@ void target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
     if (!arm_ok)
         return;
-    latest = msg;
+    {
+        std::lock_guard<std::mutex> lk(latest_mtx);
+        latest_pose = *msg;
+    }
     if (gripped)
     {
         servo_cartesian(robot, msg, ctrl_origin, ctrl_prev, arm_name.c_str());
     }
-    else//if not gripped
-    {
-        servo_hold(robot);
-    }
+    // Not gripped: send nothing. Stopping the INCR stream already holds the arm;
+    // the release edge in handle_grip sends one explicit servo_hold.
     if(debug)
     {
         RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
@@ -384,8 +422,7 @@ void button_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
     float grip = msg->axes.size() > static_cast<size_t>(grip_axis)
                      ? msg->axes[grip_axis] : 0.0f;
     if (arm_ok)
-        handle_grip(gripped, grip, latest,
-                    ctrl_origin, ctrl_prev, arm_name.c_str());
+        handle_grip(grip);
 
     if (gripper != nullptr)
     {
@@ -619,16 +656,24 @@ int main(int argc, char *argv[])
     }
 
     // Subscribe to the handle target topic and the shared button topic.
+    // keep_last(1): teleop 控制循环只关心最新一帧，depth=10 会在消费端稍慢时
+    // 积压旧位姿、引入递增延迟。与 quest_reader 端 QoSProfile(depth=1) 兼容。
     auto target_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
-        target_topic, 10, target_callback);
+        target_topic, rclcpp::QoS(1), target_callback);
     auto button_sub = node->create_subscription<sensor_msgs::msg::Joy>(
-        button_topic, 10, button_callback);
+        button_topic, rclcpp::QoS(1), button_callback);
 
     RCLCPP_INFO(rclcpp::get_logger("rc_ctrl"),
                 "rc_ctrl_node started: arm=%s, ip=%s, tracking %s (grip axis %d)",
                 arm_name.c_str(), ip.c_str(), target_topic.c_str(), grip_axis);
 
     rclcpp::spin(node);
+
+    // Wait for an in-flight background re-arm to finish before touching the SDK
+    // below (an active re-arm can block up to ~12 s on its power_on/enable
+    // settles). Joining first avoids servo_move_enable/login_out racing it.
+    if (rearm_thread.joinable())
+        rearm_thread.join();
 
     // Graceful shutdown. Only touch the arm if it actually connected: calling
     // servo_move_enable/login_out on a disconnected arm blocks until the SDK

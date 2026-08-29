@@ -21,9 +21,10 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import Joy
-from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
+from tf2_ros import StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_pose_stamped
 
 def parse_buttons(text):
@@ -249,16 +250,18 @@ class QuestReader(Node):
         # 待扫描网段（用于 MAC 解析时 ping 探测；默认与 vr_ip 同网段）
         self.vr_subnet = self.declare_parameter('vr_subnet', '192.168.1.0/24').value
 
-        # 发布者
-        self.left_pub = self.create_publisher(PoseStamped, left_topic, 5)
-        self.right_pub = self.create_publisher(PoseStamped, right_topic, 5)
-        self.button_pub = self.create_publisher(Joy, button_topic, 5)
+        # 发布者（depth=1 只保留最新一帧，避免 125 Hz 下消费端稍慢就积压旧位姿）
+        _qos = QoSProfile(depth=1)
+        self.left_pub = self.create_publisher(PoseStamped, left_topic, _qos)
+        self.right_pub = self.create_publisher(PoseStamped, right_topic, _qos)
+        self.button_pub = self.create_publisher(Joy, button_topic, _qos)
 
-        # TF：广播「眼镜帧 -> 机器人基帧」静态变换，并用 tf2 做动态变换
+        # TF：广播「眼镜帧 -> 机器人基帧」静态变换一次并缓存复用。该变换由本节点
+        # 参数构造、永不变化，热路径直接用它，不再每帧查 tf2（若未来改为外部节点
+        # 广播 TF，需回到 tf2 查询）。
         self.tf_broadcaster = StaticTransformBroadcaster(self)
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.broadcast_static_tf()
+        self.static_transform = self._make_static_transform()
+        self.tf_broadcaster.sendTransform(self.static_transform)
 
         # 共享状态（读取线程写、发布线程读）
         self.lock = threading.Lock()
@@ -267,6 +270,7 @@ class QuestReader(Node):
         self.filtered_left = None
         self.filtered_right = None
         self.latest_buttons = {}
+        self._buttons_dirty = False
         self._running = False
         self.proc = None
 
@@ -281,7 +285,7 @@ class QuestReader(Node):
             % (self.glasses_frame, self.robot_base_frame, left_topic, right_topic,
                float(publish_rate)))
 
-    def broadcast_static_tf(self):
+    def _make_static_transform(self):
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = self.robot_base_frame
@@ -293,13 +297,36 @@ class QuestReader(Node):
         t.transform.rotation.x = float(self.tf_rotation[1])
         t.transform.rotation.y = float(self.tf_rotation[2])
         t.transform.rotation.z = float(self.tf_rotation[3])
-        self.tf_broadcaster.sendTransform(t)
+        return t
 
     def _start_reader(self):
         if self.command:
             self._start_subprocess_reader()
         else:
             self._start_adb_reader()
+        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self.watchdog_thread.start()
+
+    def _watchdog_loop(self):
+        """看门狗：检测数据子进程退出并自动重连（adb/子进程通用）。
+
+        logcat / command 子进程若因 WiFi 抖动等原因挂掉，读取线程只会告警退出，
+        数据流就断了；这里轮询 proc 状态，退出后延时重启。重连会重跑
+        _setup_adb_connection（重新解析 IP/建连/重拉 APK），属恢复路径可接受。
+        """
+        delay = 3.0
+        while self._running:
+            if self.proc is not None and self.proc.poll() is not None:
+                self.get_logger().warning('数据子进程已退出，%.1fs 后重连' % delay)
+                time.sleep(delay)
+                if not self._running:
+                    break
+                if self.command:
+                    self._start_subprocess_reader()
+                else:
+                    self._start_adb_reader()
+            else:
+                time.sleep(0.5)
 
     def _start_subprocess_reader(self):
         try:
@@ -566,33 +593,30 @@ class QuestReader(Node):
                 self.filtered_right = self._filter_pose(
                     self.filtered_right, matrix_to_pose(transforms[self.right_hand_key]))
                 self.latest_right = self.filtered_right
-            if buttons:
+            if buttons and buttons != self.latest_buttons:
                 self.latest_buttons = buttons
+                self._buttons_dirty = True
 
     def publish_callback(self):
         with self.lock:
             left = self.latest_left
             right = self.latest_right
             buttons = self.latest_buttons
+            buttons_dirty = self._buttons_dirty
         if left is None and right is None:
             return
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self.robot_base_frame, self.glasses_frame, rclpy.time.Time())
-        except Exception as e:
-            self.get_logger().warning(
-                'lookup_transform 失败: %s' % e, throttle_duration_sec=2.0)
-            return
         if left is not None:
-            self.left_pub.publish(self._to_base(left, transform))
+            self.left_pub.publish(self._to_base(left))
         if right is not None:
-            self.right_pub.publish(self._to_base(right, transform))
-        if buttons is not None:
+            self.right_pub.publish(self._to_base(right))
+        if buttons is not None and buttons_dirty:
             self.button_pub.publish(buttons_to_joy(buttons))
+            with self.lock:
+                self._buttons_dirty = False
 
         self.get_logger().debug('左右手位置按钮: left=%s, right=%s, buttons=%s' % (left, right, self.latest_buttons))
 
-    def _to_base(self, pose, transform):
+    def _to_base(self, pose):
         trans, quat = pose
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
@@ -604,7 +628,7 @@ class QuestReader(Node):
         ps.pose.orientation.x = quat[1]
         ps.pose.orientation.y = quat[2]
         ps.pose.orientation.z = quat[3]
-        out = do_transform_pose_stamped(ps, transform)
+        out = do_transform_pose_stamped(ps, self.static_transform)
         out.header.frame_id = self.robot_base_frame
         return out
 
