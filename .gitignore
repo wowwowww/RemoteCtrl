@@ -24,4 +24,4 @@ __pycache__/
 *.swp
 
 #python环境
-.venv/
+venv/
